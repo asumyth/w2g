@@ -1,9 +1,10 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<!-- FIX 1: Referrer policy meta tag — tells the browser to send origin info to YouTube -->
+<meta name="referrer" content="strict-origin-when-cross-origin"/>
 <title>Watch Together</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
 <style>
@@ -48,7 +49,6 @@
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     z-index: 10;
-    flex-wrap: wrap;
   }
   .logo {
     width: 22px; height: 22px;
@@ -70,7 +70,6 @@
     flex: 1;
     gap: 6px;
     margin-left: 8px;
-    min-width: 0;
   }
   #url-input {
     flex: 1;
@@ -191,7 +190,7 @@
     background: var(--accent);
     border-radius: 2px;
     width: 0%;
-    transition: width 0.3s linear;
+    transition: width 0.5s linear;
   }
   .ctrl-btn {
     background: none; border: none;
@@ -207,11 +206,6 @@
     font-size: 11px;
     color: rgba(255,255,255,0.6);
     white-space: nowrap;
-  }
-  #volume-slider {
-    width: 60px;
-    accent-color: var(--accent);
-    cursor: pointer;
   }
   #host-badge {
     font-family: var(--font-mono);
@@ -244,7 +238,6 @@
     border-bottom: 2px solid transparent;
     transition: color 0.15s, border-color 0.15s;
     letter-spacing: 0.04em;
-    user-select: none;
   }
   .stab.active { color: var(--text); border-color: var(--accent); }
   .tab-pane { display: none; flex-direction: column; flex: 1; overflow: hidden; }
@@ -326,7 +319,7 @@
   }
   .queue-item:hover .queue-remove { opacity: 1; }
   .queue-remove:hover { color: var(--accent); }
-  #queue-empty {
+  .queue-empty {
     padding: 24px 12px;
     text-align: center;
     color: var(--muted);
@@ -382,17 +375,9 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   @media (max-width: 600px) {
-    main {
-      grid-template-columns: 1fr !important;
-      grid-template-rows: 1fr auto;
-    }
-    #sidebar {
-      border-left: none;
-      border-top: 1px solid var(--border);
-      max-height: 180px;
-    }
+    main { grid-template-columns: 1fr !important; grid-template-rows: 1fr auto; }
+    #sidebar { border-left: none; border-top: 1px solid var(--border); max-height: 180px; }
     header h1 { display: none; }
-    #url-form { margin-left: 0; }
   }
 </style>
 </head>
@@ -433,16 +418,15 @@
         <div id="yt-player"></div>
       </div>
       <div id="controls">
-        <button class="ctrl-btn" id="play-pause-btn" title="Play/Pause (k)">
+        <button class="ctrl-btn" id="play-pause-btn" title="Play/Pause">
           <svg id="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
         </button>
         <div id="progress-wrap">
           <div id="progress-bar"></div>
         </div>
         <span id="time-display">0:00 / 0:00</span>
-        <input type="range" id="volume-slider" min="0" max="100" value="100" title="Volume"/>
         <span id="host-badge" style="display:none">HOST</span>
-        <button class="ctrl-btn" id="fullscreen-btn" title="Fullscreen (f)">
+        <button class="ctrl-btn" id="fullscreen-btn" title="Fullscreen">
           <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
         </button>
       </div>
@@ -459,9 +443,7 @@
       </div>
 
       <div class="tab-pane" id="tab-queue">
-        <div id="queue-list">
-          <div id="queue-empty">Queue is empty.<br/>Add videos above.</div>
-        </div>
+        <div id="queue-list"></div>
       </div>
     </div>
   </main>
@@ -482,7 +464,6 @@
 </script>
 
 <script>
-(function() {
 'use strict';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -496,18 +477,14 @@ const DEBOUNCE_MS = 800;
 let widgetApi   = null;
 let ytPlayer    = null;
 let ytReady     = false;
-let ytApiReady  = false;
 let isHost      = false;
-let hostUserId  = null;
 let myUserId    = null;
 let currentId   = null;
 let lastSentTs  = 0;
-let suppressUntil = 0;
+let ignoreNext  = false;
 let driftTimer  = null;
-let uiTimer     = null;
 let queue       = [];
 let viewers     = {};
-let toastTimer  = null;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const COLORS = ['#ff4545','#ff7043','#f0c040','#3dd68c','#4fc3f7','#ba68c8','#f06292'];
@@ -516,66 +493,44 @@ const initials = (uid) => (uid.split(':')[0].replace('@','').slice(0,2)).toUpper
 const $ = (s) => document.querySelector(s);
 
 function esc(str) {
-  const d = document.createElement('span');
+  const d = document.createElement('div');
   d.textContent = str;
   return d.innerHTML;
 }
 
-function suppressEvents(ms = 1200) {
-  suppressUntil = Date.now() + ms;
-}
-
-function isSuppressed() {
-  return Date.now() < suppressUntil;
-}
-
-function toast(msg, ms = 2500) {
+function toast(msg, ms=2500) {
   const el = $('#toast');
   el.textContent = msg;
   el.classList.add('show');
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), ms);
+  setTimeout(() => el.classList.remove('show'), ms);
 }
 
 function fmtTime(s) {
   if (!s || isNaN(s)) return '0:00';
   s = Math.floor(s);
-  const m = Math.floor(s / 60), sec = s % 60;
-  return m + ':' + sec.toString().padStart(2, '0');
+  const m = Math.floor(s/60), sec = s%60;
+  return `${m}:${sec.toString().padStart(2,'0')}`;
 }
 
 function parseYouTubeId(raw) {
   raw = raw.trim();
   if (/^[a-zA-Z0-9_-]{11}$/.test(raw)) return raw;
   try {
-    const url = new URL(raw.startsWith('http') ? raw : 'https://' + raw);
-    if (url.hostname.includes('youtu.be')) return url.pathname.slice(1).split('?')[0].split('/')[0];
+    const url = new URL(raw.startsWith('http') ? raw : 'https://'+raw);
+    if (url.hostname.includes('youtu.be')) {
+      const id = url.pathname.slice(1).split('?')[0].split('/')[0];
+      return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
+    }
     if (url.hostname.includes('youtube.com')) {
-      // Handle /shorts/, /embed/, and ?v= formats
+      // ?v= parameter
       const v = url.searchParams.get('v');
-      if (v) return /^[a-zA-Z0-9_-]{11}$/.test(v) ? v : null;
-      const parts = url.pathname.split('/');
-      const last = parts[parts.length - 1];
-      if (/^[a-zA-Z0-9_-]{11}$/.test(last)) return last;
+      if (v && /^[a-zA-Z0-9_-]{11}$/.test(v)) return v;
+      // /embed/ID, /shorts/ID, /live/ID
+      const match = url.pathname.match(/\/(embed|shorts|live|v)\/([a-zA-Z0-9_-]{11})/);
+      if (match) return match[2];
     }
   } catch {}
   return null;
-}
-
-function validateSyncPayload(content) {
-  if (!content || typeof content !== 'object') return null;
-  const videoId = typeof content.videoId === 'string'
-    ? (content.videoId.match(/^[a-zA-Z0-9_-]{11}$/) || [])[0] || null
-    : null;
-  const position = typeof content.position === 'number' && isFinite(content.position)
-    ? Math.max(0, content.position) : 0;
-  const state = ['playing', 'paused'].includes(content.state)
-    ? content.state : 'paused';
-  const ts = typeof content.ts === 'number'
-    && content.ts > Date.now() - 120000
-    && content.ts <= Date.now() + 10000
-    ? content.ts : Date.now();
-  return { videoId, position, state, ts };
 }
 
 function setSyncStatus(state) {
@@ -588,364 +543,324 @@ function setSyncStatus(state) {
 
 function setStatus(msg) { $('#status-text').textContent = msg; }
 
-// ─── Host election ───────────────────────────────────────────────────────────
-function resolveHost(senderId) {
-  if (!hostUserId) {
-    hostUserId = senderId;
-  }
-  isHost = (myUserId === hostUserId);
-  if (viewers[hostUserId]) viewers[hostUserId].isHost = true;
-  $('#host-badge').style.display = isHost ? '' : 'none';
-}
-
-function claimHost() {
-  hostUserId = myUserId;
-  isHost = true;
-  if (viewers[myUserId]) viewers[myUserId].isHost = true;
-  $('#host-badge').style.display = '';
-}
-
-// ─── Viewers UI (safe DOM construction) ──────────────────────────────────────
+// ─── Viewers UI ──────────────────────────────────────────────────────────────
 function renderViewers() {
   const list = $('#viewers-list');
   list.innerHTML = '';
   const count = Object.keys(viewers).length;
-  $('#viewer-count').textContent = count + ' watching';
+  $('#viewer-count').textContent = `${count} watching`;
 
-  Object.entries(viewers).forEach(function(entry) {
-    var uid = entry[0], v = entry[1];
-    var isMe = uid === myUserId;
-
-    var row = document.createElement('div');
+  Object.entries(viewers).forEach(([uid, v]) => {
+    const isMe = uid === myUserId;
+    const row = document.createElement('div');
     row.className = 'viewer-row';
-
-    var avatar = document.createElement('div');
-    avatar.className = 'avatar';
-    avatar.style.background = colorFor(uid);
-    avatar.style.color = '#fff';
-    avatar.style.borderColor = colorFor(uid);
-    avatar.textContent = initials(uid);
-    row.appendChild(avatar);
-
-    var name = document.createElement('span');
-    name.className = 'viewer-name';
-    name.textContent = (v.name || uid.split(':')[0].replace('@', '')) + (isMe ? ' (you)' : '');
-    row.appendChild(name);
-
-    if (v.isHost) {
-      var tag = document.createElement('span');
-      tag.className = 'host-tag';
-      tag.textContent = 'HOST';
-      row.appendChild(tag);
-    }
-
-    if (v.position != null) {
-      var pos = document.createElement('span');
-      pos.className = 'viewer-pos';
-      pos.textContent = fmtTime(v.position);
-      row.appendChild(pos);
-    }
-
+    row.innerHTML = `
+      <div class="avatar" style="background:${colorFor(uid)};color:#fff;border-color:${colorFor(uid)}">
+        ${esc(initials(uid))}
+      </div>
+      <span class="viewer-name">${esc(v.name || uid.split(':')[0].replace('@',''))}${isMe?' (you)':''}</span>
+      ${v.isHost ? '<span class="host-tag">HOST</span>' : ''}
+      ${v.position != null ? `<span class="viewer-pos">${fmtTime(v.position)}</span>` : ''}
+    `;
     list.appendChild(row);
   });
 }
 
-// ─── Queue UI (safe DOM construction) ────────────────────────────────────────
+// ─── Queue UI ────────────────────────────────────────────────────────────────
+// FIX 2: Completely rebuild queue-list every render — no detached-node bugs
 function renderQueue() {
-  var list = $('#queue-list');
-  var empty = $('#queue-empty');
+  const list = $('#queue-list');
   list.innerHTML = '';
 
   if (queue.length === 0) {
-    empty.style.display = '';
+    const empty = document.createElement('div');
+    empty.className = 'queue-empty';
+    empty.innerHTML = 'Queue is empty.<br/>Add videos above.';
     list.appendChild(empty);
     return;
   }
-  empty.style.display = 'none';
 
-  queue.forEach(function(item, i) {
-    var el = document.createElement('div');
+  queue.forEach((item, i) => {
+    const el = document.createElement('div');
     el.className = 'queue-item' + (item.videoId === currentId ? ' playing' : '');
-
-    var thumb = document.createElement('div');
-    thumb.className = 'queue-thumb';
-    var img = document.createElement('img');
-    img.src = 'https://img.youtube.com/vi/' + encodeURIComponent(item.videoId) + '/mqdefault.jpg';
-    img.loading = 'lazy';
-    img.alt = '';
-    thumb.appendChild(img);
-    el.appendChild(thumb);
-
-    var meta = document.createElement('div');
-    meta.className = 'queue-meta';
-    var title = document.createElement('div');
-    title.className = 'queue-title';
-    title.textContent = item.title || item.videoId;
-    meta.appendChild(title);
-    var added = document.createElement('div');
-    added.className = 'queue-added';
-    added.textContent = 'by ' + (item.addedBy || 'someone');
-    meta.appendChild(added);
-    el.appendChild(meta);
-
-    var remove = document.createElement('button');
-    remove.className = 'queue-remove';
-    remove.textContent = '✕';
-    remove.title = 'Remove';
-    remove.addEventListener('click', function(e) {
+    el.innerHTML = `
+      <div class="queue-thumb"><img src="https://img.youtube.com/vi/${encodeURIComponent(item.videoId)}/mqdefault.jpg" loading="lazy" alt=""/></div>
+      <div class="queue-meta">
+        <div class="queue-title">${esc(item.title || item.videoId)}</div>
+        <div class="queue-added">by ${esc(item.addedBy || 'someone')}</div>
+      </div>
+      <button class="queue-remove" title="Remove">✕</button>
+    `;
+    // Remove button
+    el.querySelector('.queue-remove').addEventListener('click', (e) => {
       e.stopPropagation();
       queue.splice(i, 1);
       renderQueue();
       broadcastQueue();
     });
-    el.appendChild(remove);
-
-    el.addEventListener('click', function() {
+    // Click to play
+    el.addEventListener('click', () => {
       playVideo(item.videoId);
+      if (isHost) broadcastSync({ state: 'playing', videoId: item.videoId, position: 0 });
     });
-
     list.appendChild(el);
   });
 }
 
 function broadcastQueue() {
   if (!widgetApi) return;
-  widgetApi.sendRoomEvent(QUEUE_TYPE, { queue: queue })
-    .catch(function(e) { console.warn('Failed to broadcast queue:', e); });
+  widgetApi.sendRoomEvent(QUEUE_TYPE, { queue }).catch((e) => console.warn('queue broadcast failed:', e));
 }
 
 // ─── YouTube Player ──────────────────────────────────────────────────────────
+// FIX 3: Add origin + host + widget_referrer to fix Error 153
 window.onYouTubeIframeAPIReady = function() {
-  ytApiReady = true;
-};
+  // Determine the origin for the player
+  const pageOrigin = window.location.origin || window.location.protocol + '//' + window.location.host;
 
-function ensurePlayer() {
-  return new Promise(function(resolve) {
-    if (ytPlayer && ytReady) { resolve(); return; }
-    if (!ytApiReady) {
-      var check = setInterval(function() {
-        if (ytApiReady) { clearInterval(check); createPlayer(resolve); }
-      }, 100);
-      // Safety timeout
-      setTimeout(function() { clearInterval(check); }, 15000);
-    } else {
-      createPlayer(resolve);
-    }
-  });
-}
-
-function createPlayer(onDone) {
   ytPlayer = new YT.Player('yt-player', {
-    height: '100%', width: '100%',
+    height: '100%',
+    width: '100%',
+    // FIX 3a: Set host to youtube-nocookie for better embed compat
+    host: 'https://www.youtube-nocookie.com',
     playerVars: {
-      autoplay: 0, controls: 0, rel: 0,
-      modestbranding: 1, iv_load_policy: 3,
+      autoplay: 0,
+      controls: 0,
+      rel: 0,
+      modestbranding: 1,
+      iv_load_policy: 3,
       playsinline: 1,
+      // FIX 3b: origin tells YT who's embedding — required since late 2025
+      origin: pageOrigin,
+      // FIX 3c: widget_referrer helps YouTube validate the embed source
+      widget_referrer: pageOrigin,
+      // FIX 3d: enablejsapi is required for postMessage control
+      enablejsapi: 1,
     },
     events: {
-      onReady: function() {
-        ytReady = true;
-        startTimers();
-        if (onDone) onDone();
-      },
+      onReady: onYTReady,
       onStateChange: onYTStateChange,
-      onError: function(e) {
-        console.error('YT Player error:', e.data);
-        toast('Video error (code ' + e.data + ')');
-      }
+      onError: onYTError,
     }
   });
+};
+
+function onYTReady() {
+  ytReady = true;
+
+  // FIX 3e: After player creates iframe, set referrerpolicy on it
+  const iframe = document.querySelector('#yt-player iframe, #player-wrap iframe');
+  if (iframe) {
+    iframe.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+    iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen');
+  }
+
+  startDriftCheck();
+  console.log('YT Player ready');
+}
+
+// FIX 4: Handle YT errors gracefully with user feedback
+function onYTError(e) {
+  const code = e.data;
+  console.error('YouTube player error:', code);
+  const messages = {
+    2:   'Invalid video ID',
+    5:   'HTML5 player error',
+    100: 'Video not found or private',
+    101: 'Embed not allowed by owner',
+    150: 'Embed not allowed by owner',
+  };
+  const msg = messages[code] || `Player error (code ${code})`;
+  toast(msg, 4000);
+  setStatus('error: ' + msg);
+
+  // If embed blocked, try next in queue
+  if (code === 101 || code === 150) {
+    setTimeout(() => playNextInQueue(), 1500);
+  }
 }
 
 function onYTStateChange(e) {
-  var S = YT.PlayerState;
+  const S = YT.PlayerState;
   updateControlsUI();
 
   if (!isHost) return;
-  if (isSuppressed()) return;
+  if (ignoreNext) { ignoreNext = false; return; }
 
-  var now = Date.now();
+  const now = Date.now();
   if (now - lastSentTs < DEBOUNCE_MS) return;
   lastSentTs = now;
 
-  if (e.data === S.PLAYING || e.data === S.PAUSED) {
-    broadcastSync({ state: e.data === S.PLAYING ? 'playing' : 'paused' });
+  if (e.data === S.PLAYING || e.data === S.PAUSED || e.data === S.ENDED) {
+    const playing = e.data === S.PLAYING;
+    broadcastSync({ state: playing ? 'playing' : 'paused' });
     setSyncStatus('live');
-  } else if (e.data === S.ENDED) {
-    broadcastSync({ state: 'paused' });
-    playNextInQueue();
+
+    if (e.data === S.ENDED) {
+      playNextInQueue();
+    }
   }
 }
 
 function updateControlsUI() {
   if (!ytPlayer || !ytReady) return;
-  var S = YT.PlayerState;
-  var state = ytPlayer.getPlayerState();
-  var playing = state === S.PLAYING;
+  try {
+    const S = YT.PlayerState;
+    const state = ytPlayer.getPlayerState();
+    const playing = state === S.PLAYING;
 
-  $('#play-icon').setAttribute('d', playing
-    ? 'M6 19h4V5H6v14zm8-14v14h4V5h-4z'
-    : 'M8 5v14l11-7z'
-  );
+    $('#play-icon').setAttribute('d', playing
+      ? 'M6 19h4V5H6v14zm8-14v14h4V5h-4z'
+      : 'M8 5v14l11-7z'
+    );
 
-  var dur = ytPlayer.getDuration() || 0;
-  var pos = ytPlayer.getCurrentTime() || 0;
-  if (dur > 0) {
-    $('#progress-bar').style.width = (pos / dur * 100) + '%';
-    $('#time-display').textContent = fmtTime(pos) + ' / ' + fmtTime(dur);
-  }
+    const dur = ytPlayer.getDuration() || 0;
+    const pos = ytPlayer.getCurrentTime() || 0;
+    if (dur > 0) {
+      $('#progress-bar').style.width = (pos/dur*100)+'%';
+      $('#time-display').textContent = `${fmtTime(pos)} / ${fmtTime(dur)}`;
+    }
 
-  if (viewers[myUserId]) {
-    viewers[myUserId].position = pos;
-    renderViewers();
+    if (viewers[myUserId]) {
+      viewers[myUserId].position = pos;
+      renderViewers();
+    }
+  } catch(err) {
+    // Player might not be ready yet
   }
 }
 
-async function playVideo(videoId, seek) {
-  await ensurePlayer();
+function playVideo(videoId, seek) {
+  if (!ytReady) {
+    toast('Player not ready yet, try again in a moment');
+    return;
+  }
   currentId = videoId;
   $('#idle-screen').classList.add('hidden');
-  suppressEvents();
-  ytPlayer.loadVideoById({ videoId: videoId, startSeconds: seek || 0 });
-  setStatus('playing: ' + videoId);
+  ignoreNext = true;
+  ytPlayer.loadVideoById({ videoId, startSeconds: seek || 0 });
+  setStatus(`playing: ${videoId}`);
   renderQueue();
 }
 
 function playNextInQueue() {
-  var idx = queue.findIndex(function(q) { return q.videoId === currentId; });
+  const idx = queue.findIndex(q => q.videoId === currentId);
   if (idx >= 0 && idx < queue.length - 1) {
-    var next = queue[idx + 1];
+    const next = queue[idx + 1];
     playVideo(next.videoId);
     if (isHost) broadcastSync({ state: 'playing', videoId: next.videoId, position: 0 });
+  } else {
+    toast('Queue ended');
   }
 }
 
 // ─── Sync ────────────────────────────────────────────────────────────────────
-function broadcastSync(extra) {
+function broadcastSync(extra = {}) {
   if (!widgetApi) return;
-  extra = extra || {};
-  var payload = {
-    videoId: extra.videoId || currentId,
-    position: (extra.position != null) ? extra.position : (ytPlayer ? ytPlayer.getCurrentTime() || 0 : 0),
-    state: extra.state || 'playing',
+  const payload = {
+    videoId: currentId,
+    position: ytPlayer?.getCurrentTime() || 0,
+    state: 'playing',
     ts: Date.now(),
+    ...extra,
   };
-  widgetApi.sendRoomEvent(EVENT_TYPE, payload)
-    .catch(function(e) { console.warn('Failed to send sync:', e); });
+  widgetApi.sendRoomEvent(EVENT_TYPE, payload).catch((e) => console.warn('sync failed:', e));
 }
 
-function applySync(rawContent) {
+function applySync(content) {
   if (!ytReady) return;
-  var content = validateSyncPayload(rawContent);
-  if (!content) return;
+  const { videoId, position, state, ts } = content;
+  if (!videoId || typeof videoId !== 'string') return;
+  // Validate video ID format
+  if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return;
 
-  var videoId = content.videoId;
-  var position = content.position;
-  var state = content.state;
+  const adjusted = position + Math.min((Date.now() - ts) / 1000, 5); // cap adjustment at 5s
+  const S = YT.PlayerState;
 
   setSyncStatus('sync');
 
-  // Video change
   if (videoId && videoId !== currentId) {
-    playVideo(videoId, position);
-    if (state === 'playing') {
-      suppressEvents();
-      ytPlayer.playVideo();
-    }
+    playVideo(videoId, adjusted);
+    if (state === 'playing') { ignoreNext = true; ytPlayer.playVideo(); }
     setSyncStatus('live');
     return;
   }
 
   if (!videoId) { setSyncStatus('live'); return; }
 
-  // Drift correction — compare positions directly, add small latency estimate
-  var ESTIMATED_LATENCY = 0.3;
-  var targetPos = state === 'playing' ? position + ESTIMATED_LATENCY : position;
-  var curPos = ytPlayer.getCurrentTime() || 0;
-  var drift = Math.abs(curPos - targetPos);
+  const curPos = ytPlayer.getCurrentTime() || 0;
+  const drift = Math.abs(curPos - adjusted);
 
   if (drift > DRIFT_LIMIT) {
-    suppressEvents();
-    ytPlayer.seekTo(targetPos, true);
+    ignoreNext = true;
+    ytPlayer.seekTo(adjusted, true);
   }
 
-  suppressEvents();
+  ignoreNext = true;
   if (state === 'playing') ytPlayer.playVideo();
   else ytPlayer.pauseVideo();
 
   setSyncStatus('live');
 }
 
-function startTimers() {
+function startDriftCheck() {
   if (driftTimer) clearInterval(driftTimer);
-  if (uiTimer) clearInterval(uiTimer);
-
-  driftTimer = setInterval(function() {
+  driftTimer = setInterval(() => {
     if (!isHost || !ytReady || !currentId) return;
-    if (ytPlayer.getPlayerState() === YT.PlayerState.PLAYING) broadcastSync();
+    try {
+      const s = ytPlayer.getPlayerState();
+      if (s === YT.PlayerState.PLAYING) broadcastSync();
+    } catch(e) {}
     updateControlsUI();
   }, POLL_MS);
 
-  uiTimer = setInterval(updateControlsUI, 500);
+  setInterval(updateControlsUI, 500);
 }
 
-// ─── Widget API init ─────────────────────────────────────────────────────────
+// ─── Matrix Widget API init ──────────────────────────────────────────────────
 async function initWidget() {
   try {
-    var WidgetApi = matrixWidgetApi.WidgetApi;
-    var WidgetApiToWidgetAction = matrixWidgetApi.WidgetApiToWidgetAction;
+    const WidgetApi = matrixWidgetApi.WidgetApi;
+    const WidgetApiToWidgetAction = matrixWidgetApi.WidgetApiToWidgetAction;
 
-    var params = new URLSearchParams(location.search);
-    var widgetId = params.get('widgetId') || params.get('widget_id') || 'standalone';
+    const params = new URLSearchParams(location.search);
+    const widgetId = params.get('widgetId') || params.get('widget_id') || 'standalone';
 
     widgetApi = new WidgetApi(widgetId);
 
-    // Only request specific event types
+    // FIX 5: Only request specific capabilities, not blanket ones
     widgetApi.requestCapabilityToSendEvent(EVENT_TYPE);
     widgetApi.requestCapabilityToReceiveEvent(EVENT_TYPE);
     widgetApi.requestCapabilityToSendEvent(QUEUE_TYPE);
     widgetApi.requestCapabilityToReceiveEvent(QUEUE_TYPE);
 
-    widgetApi.on('ready', async function() {
+    widgetApi.on('ready', async () => {
       try {
-        var info = await widgetApi.requestOpenIDConnectToken();
-        myUserId = info && info.matrix_server_name
-          ? '@unknown:' + info.matrix_server_name
-          : '@me:local';
-      } catch(e) {
-        console.warn('Could not get OIDC token:', e);
-        myUserId = '@me:local';
-      }
+        const info = await widgetApi.requestOpenIDConnectToken();
+        myUserId = info?.matrix_server_name ? `@unknown:${info.matrix_server_name}` : '@me:local';
+      } catch { myUserId = '@me:local'; }
       onReady();
     });
 
-    widgetApi.on('action:' + WidgetApiToWidgetAction.SendEvent, function(ev) {
-      var data = (ev.detail && ev.detail.data) || {};
-      var type = data.type;
-      var content = data.content;
-      var sender = data.sender;
+    widgetApi.on(`action:${WidgetApiToWidgetAction.SendEvent}`, (ev) => {
+      const { type, content, sender } = ev.detail?.data || {};
       ev.preventDefault();
       widgetApi.transport.reply(ev.detail, {});
 
       if (type === EVENT_TYPE) {
         if (sender) {
-          resolveHost(sender);
           viewers[sender] = viewers[sender] || {};
-          viewers[sender].position = content ? content.position : null;
-          viewers[sender].name = sender.split(':')[0].replace('@', '');
-          viewers[sender].isHost = (sender === hostUserId);
+          viewers[sender].position = content.position;
+          viewers[sender].name = sender.split(':')[0].replace('@','');
           renderViewers();
         }
         if (sender === myUserId) return;
-        if (content) applySync(content);
+        applySync(content);
       }
 
       if (type === QUEUE_TYPE && sender !== myUserId) {
-        if (content && Array.isArray(content.queue)) {
-          queue = content.queue.filter(function(item) {
-            return item && typeof item.videoId === 'string'
-              && /^[a-zA-Z0-9_-]{11}$/.test(item.videoId);
-          });
+        if (content.queue && Array.isArray(content.queue)) {
+          queue = content.queue;
           renderQueue();
         }
       }
@@ -953,7 +868,7 @@ async function initWidget() {
 
     widgetApi.start();
 
-    setTimeout(function() {
+    setTimeout(() => {
       if (!myUserId) {
         console.warn('Widget API timeout — running standalone');
         myUserId = '@standalone:local';
@@ -972,16 +887,13 @@ async function initWidget() {
 function onReady() {
   $('#not-ready').classList.add('hidden');
 
-  claimHost();
+  isHost = true;
+  $('#host-badge').style.display = isHost ? '' : 'none';
   setStatus('ready · paste a URL to watch together');
 
-  viewers[myUserId] = {
-    name: myUserId.split(':')[0].replace('@', ''),
-    isHost: isHost,
-    color: colorFor(myUserId),
-    position: null
-  };
+  viewers[myUserId] = { name: myUserId.split(':')[0].replace('@',''), isHost, color: colorFor(myUserId) };
   renderViewers();
+  renderQueue(); // FIX 6: Render queue on init so empty state shows
 
   setSyncStatus(widgetApi ? 'live' : 'waiting');
 
@@ -992,27 +904,30 @@ function onReady() {
 
 // ─── UI Events ───────────────────────────────────────────────────────────────
 
-$('#url-form').addEventListener('submit', function(e) {
+// FIX 7: Add to queue — auto-play first item if nothing is playing
+$('#url-form').addEventListener('submit', (e) => {
   e.preventDefault();
-  var raw = $('#url-input').value;
-  var vid = parseYouTubeId(raw);
+  const raw = $('#url-input').value;
+  const vid = parseYouTubeId(raw);
   if (!vid) {
     $('#url-input').classList.add('error');
-    setTimeout(function() { $('#url-input').classList.remove('error'); }, 600);
+    setTimeout(() => $('#url-input').classList.remove('error'), 600);
     toast('Not a valid YouTube URL or video ID');
     return;
   }
-  var exists = queue.some(function(q) { return q.videoId === vid; });
+  const exists = queue.some(q => q.videoId === vid);
   if (!exists) {
-    queue.push({
-      videoId: vid,
-      title: vid,
-      addedBy: myUserId ? myUserId.split(':')[0].replace('@', '') : 'you'
-    });
+    queue.push({ videoId: vid, title: vid, addedBy: myUserId?.split(':')[0].replace('@','') || 'you' });
     broadcastQueue();
     renderQueue();
     toast('Added to queue');
     fetchTitle(vid);
+
+    // Auto-play if nothing is currently playing
+    if (!currentId) {
+      playVideo(vid);
+      if (isHost) broadcastSync({ state: 'playing', videoId: vid, position: 0 });
+    }
   } else {
     toast('Already in queue');
   }
@@ -1020,24 +935,33 @@ $('#url-form').addEventListener('submit', function(e) {
   activateTab('queue');
 });
 
-$('#watch-now-btn').addEventListener('click', function() {
-  var raw = $('#url-input').value;
-  var vid = parseYouTubeId(raw);
+$('#watch-now-btn').addEventListener('click', () => {
+  const raw = $('#url-input').value;
+  const vid = parseYouTubeId(raw);
   if (!vid) {
     $('#url-input').classList.add('error');
-    setTimeout(function() { $('#url-input').classList.remove('error'); }, 600);
+    setTimeout(() => $('#url-input').classList.remove('error'), 600);
     toast('Not a valid YouTube URL or video ID');
     return;
   }
   $('#url-input').value = '';
+
+  // Also add to queue if not there
+  if (!queue.some(q => q.videoId === vid)) {
+    queue.push({ videoId: vid, title: vid, addedBy: myUserId?.split(':')[0].replace('@','') || 'you' });
+    broadcastQueue();
+    fetchTitle(vid);
+  }
+
   playVideo(vid);
+  renderQueue();
   if (isHost) broadcastSync({ state: 'playing', videoId: vid, position: 0 });
 });
 
-$('#play-pause-btn').addEventListener('click', function() {
+$('#play-pause-btn').addEventListener('click', () => {
   if (!ytPlayer || !ytReady || !currentId) return;
-  var S = YT.PlayerState;
-  var state = ytPlayer.getPlayerState();
+  const S = YT.PlayerState;
+  const state = ytPlayer.getPlayerState();
   if (state === S.PLAYING) {
     ytPlayer.pauseVideo();
     if (isHost) broadcastSync({ state: 'paused' });
@@ -1047,92 +971,45 @@ $('#play-pause-btn').addEventListener('click', function() {
   }
 });
 
-$('#progress-wrap').addEventListener('click', function(e) {
+$('#progress-wrap').addEventListener('click', (e) => {
   if (!ytReady || !currentId) return;
-  var rect = e.currentTarget.getBoundingClientRect();
-  var frac = (e.clientX - rect.left) / rect.width;
-  var dur = ytPlayer.getDuration() || 0;
-  var pos = frac * dur;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const frac = (e.clientX - rect.left) / rect.width;
+  const dur = ytPlayer.getDuration() || 0;
+  const pos = frac * dur;
   ytPlayer.seekTo(pos, true);
   if (isHost) broadcastSync({ state: 'playing', position: pos });
 });
 
-$('#volume-slider').addEventListener('input', function(e) {
-  if (!ytPlayer || !ytReady) return;
-  var vol = +e.target.value;
-  ytPlayer.setVolume(vol);
-  if (vol === 0) ytPlayer.mute();
-  else ytPlayer.unMute();
-});
-
-$('#fullscreen-btn').addEventListener('click', function() {
-  var el = $('#player-area');
+$('#fullscreen-btn').addEventListener('click', () => {
+  const el = $('#player-area');
   if (document.fullscreenElement) document.exitFullscreen();
-  else el.requestFullscreen().catch(function() {});
+  else el.requestFullscreen().catch(()=>{});
 });
 
-document.querySelectorAll('.stab').forEach(function(tab) {
-  tab.addEventListener('click', function() { activateTab(tab.dataset.tab); });
+document.querySelectorAll('.stab').forEach(tab => {
+  tab.addEventListener('click', () => activateTab(tab.dataset.tab));
 });
 
 function activateTab(name) {
-  document.querySelectorAll('.stab').forEach(function(t) {
-    t.classList.toggle('active', t.dataset.tab === name);
-  });
-  document.querySelectorAll('.tab-pane').forEach(function(p) {
-    p.classList.toggle('active', p.id === 'tab-' + name);
-  });
+  document.querySelectorAll('.stab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
 }
 
-// ─── Keyboard shortcuts ──────────────────────────────────────────────────────
-document.addEventListener('keydown', function(e) {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-
-  switch (e.key) {
-    case ' ':
-    case 'k':
-      e.preventDefault();
-      $('#play-pause-btn').click();
-      break;
-    case 'f':
-      e.preventDefault();
-      $('#fullscreen-btn').click();
-      break;
-    case 'ArrowLeft':
-      e.preventDefault();
-      if (ytReady && currentId) {
-        var t = Math.max(0, ytPlayer.getCurrentTime() - 10);
-        ytPlayer.seekTo(t, true);
-        if (isHost) broadcastSync({ position: t });
-      }
-      break;
-    case 'ArrowRight':
-      e.preventDefault();
-      if (ytReady && currentId) {
-        var t2 = Math.min(ytPlayer.getDuration(), ytPlayer.getCurrentTime() + 10);
-        ytPlayer.seekTo(t2, true);
-        if (isHost) broadcastSync({ position: t2 });
-      }
-      break;
-    case 'N':
-      playNextInQueue();
-      break;
-  }
-});
-
-// ─── Title fetch (CORS-safe) ─────────────────────────────────────────────────
+// ─── Title fetch ─────────────────────────────────────────────────────────────
 async function fetchTitle(videoId) {
-  var urls = [
-    'https://noembed.com/embed?url=https://youtube.com/watch?v=' + encodeURIComponent(videoId),
-    'https://www.youtube.com/oembed?url=https://youtube.com/watch?v=' + encodeURIComponent(videoId) + '&format=json',
+  // FIX 8: Use noembed.com first (more CORS-friendly), then YouTube oEmbed
+  const urls = [
+    `https://noembed.com/embed?url=https://youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+    `https://www.youtube.com/oembed?url=https://youtube.com/watch?v=${encodeURIComponent(videoId)}&format=json`,
   ];
-  for (var u = 0; u < urls.length; u++) {
+  for (const url of urls) {
     try {
-      var res = await fetch(urls[u]);
+      const res = await fetch(url);
       if (!res.ok) continue;
-      var data = await res.json();
+      const data = await res.json();
       if (data.title) {
-        var item = queue.find(function(q) { return q.videoId === videoId; });
+        const item = queue.find(q => q.videoId === videoId);
         if (item) {
           item.title = data.title;
           renderQueue();
@@ -1140,21 +1017,12 @@ async function fetchTitle(videoId) {
         }
         return;
       }
-    } catch(e) { continue; }
+    } catch { continue; }
   }
 }
 
-// ─── Cleanup ─────────────────────────────────────────────────────────────────
-window.addEventListener('beforeunload', function() {
-  if (driftTimer) clearInterval(driftTimer);
-  if (uiTimer) clearInterval(uiTimer);
-  if (ytPlayer) { try { ytPlayer.destroy(); } catch(e) {} }
-});
-
 // ─── Boot ────────────────────────────────────────────────────────────────────
 initWidget();
-
-})();
 </script>
 </body>
 </html>
