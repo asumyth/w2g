@@ -1,0 +1,1160 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Watch Together</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0e0e10;
+    --surface:   #18181b;
+    --surface2:  #1f1f24;
+    --border:    #2a2a30;
+    --accent:    #ff4545;
+    --accent2:   #ff7043;
+    --text:      #e8e8ec;
+    --muted:     #6b6b78;
+    --online:    #3dd68c;
+    --font-ui:   'DM Sans', sans-serif;
+    --font-mono: 'DM Mono', monospace;
+    --radius:    8px;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    overflow: hidden;
+  }
+
+  #app {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: 100vh;
+    max-height: 100vh;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    z-index: 10;
+    flex-wrap: wrap;
+  }
+  .logo {
+    width: 22px; height: 22px;
+    background: var(--accent);
+    border-radius: 5px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .logo svg { width: 12px; height: 12px; fill: #fff; }
+  header h1 {
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: var(--text);
+    flex-shrink: 0;
+  }
+  #url-form {
+    display: flex;
+    flex: 1;
+    gap: 6px;
+    margin-left: 8px;
+    min-width: 0;
+  }
+  #url-input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.15s;
+    min-width: 0;
+  }
+  #url-input::placeholder { color: var(--muted); }
+  #url-input:focus { border-color: var(--accent); }
+  #url-input.error { border-color: #ff6b6b; animation: shake 0.25s ease; }
+  @keyframes shake {
+    0%,100%{transform:translateX(0)} 25%{transform:translateX(-4px)} 75%{transform:translateX(4px)}
+  }
+  .btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: 6px 14px;
+    font-family: var(--font-ui);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+  .btn:hover { opacity: 0.88; }
+  .btn:active { transform: scale(0.97); }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 5px 10px;
+  }
+  .btn-ghost:hover { border-color: var(--text); color: var(--text); opacity: 1; }
+  #sync-indicator {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--muted);
+    flex-shrink: 0;
+    margin-left: 4px;
+    font-family: var(--font-mono);
+  }
+  #sync-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.3s;
+  }
+  #sync-dot.live { background: var(--online); box-shadow: 0 0 0 2px rgba(61,214,140,0.2); }
+  #sync-dot.syncing { background: #f0c040; }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 200px;
+    overflow: hidden;
+  }
+
+  #player-area {
+    display: flex;
+    flex-direction: column;
+    background: #000;
+    position: relative;
+    overflow: hidden;
+  }
+  #player-wrap {
+    flex: 1;
+    position: relative;
+    background: #000;
+  }
+  #player-wrap iframe, #player-wrap > div {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+  }
+  #idle-screen {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 14px;
+    background: var(--bg);
+    color: var(--muted);
+    z-index: 1;
+  }
+  #idle-screen.hidden { display: none; }
+  #idle-screen svg { width: 48px; height: 48px; opacity: 0.25; }
+  #idle-screen p { font-size: 13px; }
+  #idle-screen span { font-family: var(--font-mono); font-size: 11px; color: var(--muted); opacity: 0.7; }
+
+  #controls {
+    background: linear-gradient(transparent, rgba(0,0,0,0.8));
+    padding: 8px 12px 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    z-index: 2;
+  }
+  #player-area:hover #controls { opacity: 1; }
+  #progress-wrap {
+    flex: 1;
+    height: 4px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 2px;
+    cursor: pointer;
+    position: relative;
+  }
+  #progress-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.3s linear;
+  }
+  .ctrl-btn {
+    background: none; border: none;
+    color: rgba(255,255,255,0.8);
+    cursor: pointer; padding: 2px;
+    display: flex; align-items: center; justify-content: center;
+    transition: color 0.15s;
+  }
+  .ctrl-btn:hover { color: #fff; }
+  .ctrl-btn svg { width: 16px; height: 16px; fill: currentColor; }
+  #time-display {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: rgba(255,255,255,0.6);
+    white-space: nowrap;
+  }
+  #volume-slider {
+    width: 60px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  #host-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    background: var(--accent);
+    color: #fff;
+    padding: 1px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.05em;
+  }
+
+  #sidebar {
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .sidebar-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .stab {
+    flex: 1; padding: 8px 4px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    letter-spacing: 0.04em;
+    user-select: none;
+  }
+  .stab.active { color: var(--text); border-color: var(--accent); }
+  .tab-pane { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+  .tab-pane.active { display: flex; }
+
+  #viewers-list {
+    flex: 1; overflow-y: auto;
+    padding: 8px 0;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .viewer-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 12px;
+    font-size: 12px;
+  }
+  .avatar {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 1.5px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px;
+    font-weight: 500;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .avatar::after {
+    content: '';
+    position: absolute; bottom: 0; right: 0;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--online);
+    border: 1.5px solid var(--surface);
+  }
+  .viewer-name { color: var(--text); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .viewer-pos { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+  .host-tag {
+    font-size: 9px;
+    background: rgba(255,69,69,0.15);
+    color: var(--accent);
+    padding: 1px 4px;
+    border-radius: 3px;
+    letter-spacing: 0.05em;
+  }
+
+  #queue-list {
+    flex: 1; overflow-y: auto;
+    padding: 8px 0;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .queue-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+    transition: background 0.1s;
+    border-radius: 4px;
+    margin: 0 4px;
+  }
+  .queue-item:hover { background: var(--surface2); }
+  .queue-item.playing { background: rgba(255,69,69,0.1); }
+  .queue-thumb {
+    width: 48px; height: 32px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .queue-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .queue-meta { flex: 1; min-width: 0; }
+  .queue-title { font-size: 11px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .queue-added { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .queue-remove {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; opacity: 0; padding: 2px;
+    font-size: 14px; line-height: 1;
+    transition: opacity 0.1s, color 0.1s;
+  }
+  .queue-item:hover .queue-remove { opacity: 1; }
+  .queue-remove:hover { color: var(--accent); }
+  #queue-empty {
+    padding: 24px 12px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  footer {
+    display: flex; align-items: center; gap: 10px;
+    padding: 5px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+  }
+  #status-text { flex: 1; }
+  #viewer-count { color: var(--text); }
+
+  #toast {
+    position: fixed; bottom: 40px; left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 16px;
+    font-size: 12px;
+    color: var(--text);
+    opacity: 0;
+    transition: opacity 0.2s, transform 0.2s;
+    pointer-events: none;
+    z-index: 100;
+    white-space: nowrap;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  #not-ready {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 10px; z-index: 200;
+  }
+  #not-ready.hidden { display: none; }
+  #not-ready p { font-size: 12px; color: var(--muted); }
+  .spinner {
+    width: 24px; height: 24px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 600px) {
+    main {
+      grid-template-columns: 1fr !important;
+      grid-template-rows: 1fr auto;
+    }
+    #sidebar {
+      border-left: none;
+      border-top: 1px solid var(--border);
+      max-height: 180px;
+    }
+    header h1 { display: none; }
+    #url-form { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+
+<div id="not-ready">
+  <div class="spinner"></div>
+  <p>Connecting to room…</p>
+</div>
+
+<div id="app">
+  <header>
+    <div class="logo">
+      <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+    </div>
+    <h1>watch together</h1>
+
+    <form id="url-form">
+      <input id="url-input" type="text" placeholder="Paste YouTube URL or video ID…" autocomplete="off" spellcheck="false"/>
+      <button class="btn" type="submit">Add</button>
+      <button class="btn btn-ghost" type="button" id="watch-now-btn">Play now</button>
+    </form>
+
+    <div id="sync-indicator">
+      <div id="sync-dot"></div>
+      <span id="sync-label">waiting</span>
+    </div>
+  </header>
+
+  <main>
+    <div id="player-area">
+      <div id="player-wrap">
+        <div id="idle-screen">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21.543 6.498C22 8.28 22 12 22 12s0 3.72-.457 5.502c-.254.985-.997 1.76-1.938 2.022C17.896 20 12 20 12 20s-5.895 0-7.605-.476c-.940-.262-1.684-1.037-1.938-2.022C2 15.72 2 12 2 12s0-3.72.457-5.502c.254-.985.997-1.76 1.938-2.022C6.105 4 12 4 12 4s5.896 0 7.605.476c.941.262 1.684 1.037 1.938 2.022zM10 15.5l6-3.5-6-3.5v7z"/></svg>
+          <p>No video playing</p>
+          <span>Paste a YouTube URL above to start</span>
+        </div>
+        <div id="yt-player"></div>
+      </div>
+      <div id="controls">
+        <button class="ctrl-btn" id="play-pause-btn" title="Play/Pause (k)">
+          <svg id="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+        <div id="progress-wrap">
+          <div id="progress-bar"></div>
+        </div>
+        <span id="time-display">0:00 / 0:00</span>
+        <input type="range" id="volume-slider" min="0" max="100" value="100" title="Volume"/>
+        <span id="host-badge" style="display:none">HOST</span>
+        <button class="ctrl-btn" id="fullscreen-btn" title="Fullscreen (f)">
+          <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div id="sidebar">
+      <div class="sidebar-tabs">
+        <div class="stab active" data-tab="viewers">VIEWERS</div>
+        <div class="stab" data-tab="queue">QUEUE</div>
+      </div>
+
+      <div class="tab-pane active" id="tab-viewers">
+        <div id="viewers-list"></div>
+      </div>
+
+      <div class="tab-pane" id="tab-queue">
+        <div id="queue-list">
+          <div id="queue-empty">Queue is empty.<br/>Add videos above.</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <span id="status-text">idle</span>
+    <span id="viewer-count">0 watching</span>
+  </footer>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/matrix-widget-api@1.9.0/dist/matrix-widget-api.js"></script>
+<script>
+  var tag = document.createElement('script');
+  tag.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(tag);
+</script>
+
+<script>
+(function() {
+'use strict';
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const EVENT_TYPE  = 'io.watch_together.sync';
+const QUEUE_TYPE  = 'io.watch_together.queue';
+const DRIFT_LIMIT = 2.0;
+const POLL_MS     = 5000;
+const DEBOUNCE_MS = 800;
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let widgetApi   = null;
+let ytPlayer    = null;
+let ytReady     = false;
+let ytApiReady  = false;
+let isHost      = false;
+let hostUserId  = null;
+let myUserId    = null;
+let currentId   = null;
+let lastSentTs  = 0;
+let suppressUntil = 0;
+let driftTimer  = null;
+let uiTimer     = null;
+let queue       = [];
+let viewers     = {};
+let toastTimer  = null;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const COLORS = ['#ff4545','#ff7043','#f0c040','#3dd68c','#4fc3f7','#ba68c8','#f06292'];
+const colorFor = (uid) => COLORS[Math.abs([...uid].reduce((a,c)=>a+c.charCodeAt(0),0)) % COLORS.length];
+const initials = (uid) => (uid.split(':')[0].replace('@','').slice(0,2)).toUpperCase();
+const $ = (s) => document.querySelector(s);
+
+function esc(str) {
+  const d = document.createElement('span');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function suppressEvents(ms = 1200) {
+  suppressUntil = Date.now() + ms;
+}
+
+function isSuppressed() {
+  return Date.now() < suppressUntil;
+}
+
+function toast(msg, ms = 2500) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), ms);
+}
+
+function fmtTime(s) {
+  if (!s || isNaN(s)) return '0:00';
+  s = Math.floor(s);
+  const m = Math.floor(s / 60), sec = s % 60;
+  return m + ':' + sec.toString().padStart(2, '0');
+}
+
+function parseYouTubeId(raw) {
+  raw = raw.trim();
+  if (/^[a-zA-Z0-9_-]{11}$/.test(raw)) return raw;
+  try {
+    const url = new URL(raw.startsWith('http') ? raw : 'https://' + raw);
+    if (url.hostname.includes('youtu.be')) return url.pathname.slice(1).split('?')[0].split('/')[0];
+    if (url.hostname.includes('youtube.com')) {
+      // Handle /shorts/, /embed/, and ?v= formats
+      const v = url.searchParams.get('v');
+      if (v) return /^[a-zA-Z0-9_-]{11}$/.test(v) ? v : null;
+      const parts = url.pathname.split('/');
+      const last = parts[parts.length - 1];
+      if (/^[a-zA-Z0-9_-]{11}$/.test(last)) return last;
+    }
+  } catch {}
+  return null;
+}
+
+function validateSyncPayload(content) {
+  if (!content || typeof content !== 'object') return null;
+  const videoId = typeof content.videoId === 'string'
+    ? (content.videoId.match(/^[a-zA-Z0-9_-]{11}$/) || [])[0] || null
+    : null;
+  const position = typeof content.position === 'number' && isFinite(content.position)
+    ? Math.max(0, content.position) : 0;
+  const state = ['playing', 'paused'].includes(content.state)
+    ? content.state : 'paused';
+  const ts = typeof content.ts === 'number'
+    && content.ts > Date.now() - 120000
+    && content.ts <= Date.now() + 10000
+    ? content.ts : Date.now();
+  return { videoId, position, state, ts };
+}
+
+function setSyncStatus(state) {
+  const dot = $('#sync-dot'), label = $('#sync-label');
+  dot.className = '';
+  if (state === 'live')    { dot.classList.add('live');    label.textContent = 'synced'; }
+  else if (state === 'sync') { dot.classList.add('syncing'); label.textContent = 'syncing'; }
+  else                    { label.textContent = 'waiting'; }
+}
+
+function setStatus(msg) { $('#status-text').textContent = msg; }
+
+// ─── Host election ───────────────────────────────────────────────────────────
+function resolveHost(senderId) {
+  if (!hostUserId) {
+    hostUserId = senderId;
+  }
+  isHost = (myUserId === hostUserId);
+  if (viewers[hostUserId]) viewers[hostUserId].isHost = true;
+  $('#host-badge').style.display = isHost ? '' : 'none';
+}
+
+function claimHost() {
+  hostUserId = myUserId;
+  isHost = true;
+  if (viewers[myUserId]) viewers[myUserId].isHost = true;
+  $('#host-badge').style.display = '';
+}
+
+// ─── Viewers UI (safe DOM construction) ──────────────────────────────────────
+function renderViewers() {
+  const list = $('#viewers-list');
+  list.innerHTML = '';
+  const count = Object.keys(viewers).length;
+  $('#viewer-count').textContent = count + ' watching';
+
+  Object.entries(viewers).forEach(function(entry) {
+    var uid = entry[0], v = entry[1];
+    var isMe = uid === myUserId;
+
+    var row = document.createElement('div');
+    row.className = 'viewer-row';
+
+    var avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.style.background = colorFor(uid);
+    avatar.style.color = '#fff';
+    avatar.style.borderColor = colorFor(uid);
+    avatar.textContent = initials(uid);
+    row.appendChild(avatar);
+
+    var name = document.createElement('span');
+    name.className = 'viewer-name';
+    name.textContent = (v.name || uid.split(':')[0].replace('@', '')) + (isMe ? ' (you)' : '');
+    row.appendChild(name);
+
+    if (v.isHost) {
+      var tag = document.createElement('span');
+      tag.className = 'host-tag';
+      tag.textContent = 'HOST';
+      row.appendChild(tag);
+    }
+
+    if (v.position != null) {
+      var pos = document.createElement('span');
+      pos.className = 'viewer-pos';
+      pos.textContent = fmtTime(v.position);
+      row.appendChild(pos);
+    }
+
+    list.appendChild(row);
+  });
+}
+
+// ─── Queue UI (safe DOM construction) ────────────────────────────────────────
+function renderQueue() {
+  var list = $('#queue-list');
+  var empty = $('#queue-empty');
+  list.innerHTML = '';
+
+  if (queue.length === 0) {
+    empty.style.display = '';
+    list.appendChild(empty);
+    return;
+  }
+  empty.style.display = 'none';
+
+  queue.forEach(function(item, i) {
+    var el = document.createElement('div');
+    el.className = 'queue-item' + (item.videoId === currentId ? ' playing' : '');
+
+    var thumb = document.createElement('div');
+    thumb.className = 'queue-thumb';
+    var img = document.createElement('img');
+    img.src = 'https://img.youtube.com/vi/' + encodeURIComponent(item.videoId) + '/mqdefault.jpg';
+    img.loading = 'lazy';
+    img.alt = '';
+    thumb.appendChild(img);
+    el.appendChild(thumb);
+
+    var meta = document.createElement('div');
+    meta.className = 'queue-meta';
+    var title = document.createElement('div');
+    title.className = 'queue-title';
+    title.textContent = item.title || item.videoId;
+    meta.appendChild(title);
+    var added = document.createElement('div');
+    added.className = 'queue-added';
+    added.textContent = 'by ' + (item.addedBy || 'someone');
+    meta.appendChild(added);
+    el.appendChild(meta);
+
+    var remove = document.createElement('button');
+    remove.className = 'queue-remove';
+    remove.textContent = '✕';
+    remove.title = 'Remove';
+    remove.addEventListener('click', function(e) {
+      e.stopPropagation();
+      queue.splice(i, 1);
+      renderQueue();
+      broadcastQueue();
+    });
+    el.appendChild(remove);
+
+    el.addEventListener('click', function() {
+      playVideo(item.videoId);
+    });
+
+    list.appendChild(el);
+  });
+}
+
+function broadcastQueue() {
+  if (!widgetApi) return;
+  widgetApi.sendRoomEvent(QUEUE_TYPE, { queue: queue })
+    .catch(function(e) { console.warn('Failed to broadcast queue:', e); });
+}
+
+// ─── YouTube Player ──────────────────────────────────────────────────────────
+window.onYouTubeIframeAPIReady = function() {
+  ytApiReady = true;
+};
+
+function ensurePlayer() {
+  return new Promise(function(resolve) {
+    if (ytPlayer && ytReady) { resolve(); return; }
+    if (!ytApiReady) {
+      var check = setInterval(function() {
+        if (ytApiReady) { clearInterval(check); createPlayer(resolve); }
+      }, 100);
+      // Safety timeout
+      setTimeout(function() { clearInterval(check); }, 15000);
+    } else {
+      createPlayer(resolve);
+    }
+  });
+}
+
+function createPlayer(onDone) {
+  ytPlayer = new YT.Player('yt-player', {
+    height: '100%', width: '100%',
+    playerVars: {
+      autoplay: 0, controls: 0, rel: 0,
+      modestbranding: 1, iv_load_policy: 3,
+      playsinline: 1,
+    },
+    events: {
+      onReady: function() {
+        ytReady = true;
+        startTimers();
+        if (onDone) onDone();
+      },
+      onStateChange: onYTStateChange,
+      onError: function(e) {
+        console.error('YT Player error:', e.data);
+        toast('Video error (code ' + e.data + ')');
+      }
+    }
+  });
+}
+
+function onYTStateChange(e) {
+  var S = YT.PlayerState;
+  updateControlsUI();
+
+  if (!isHost) return;
+  if (isSuppressed()) return;
+
+  var now = Date.now();
+  if (now - lastSentTs < DEBOUNCE_MS) return;
+  lastSentTs = now;
+
+  if (e.data === S.PLAYING || e.data === S.PAUSED) {
+    broadcastSync({ state: e.data === S.PLAYING ? 'playing' : 'paused' });
+    setSyncStatus('live');
+  } else if (e.data === S.ENDED) {
+    broadcastSync({ state: 'paused' });
+    playNextInQueue();
+  }
+}
+
+function updateControlsUI() {
+  if (!ytPlayer || !ytReady) return;
+  var S = YT.PlayerState;
+  var state = ytPlayer.getPlayerState();
+  var playing = state === S.PLAYING;
+
+  $('#play-icon').setAttribute('d', playing
+    ? 'M6 19h4V5H6v14zm8-14v14h4V5h-4z'
+    : 'M8 5v14l11-7z'
+  );
+
+  var dur = ytPlayer.getDuration() || 0;
+  var pos = ytPlayer.getCurrentTime() || 0;
+  if (dur > 0) {
+    $('#progress-bar').style.width = (pos / dur * 100) + '%';
+    $('#time-display').textContent = fmtTime(pos) + ' / ' + fmtTime(dur);
+  }
+
+  if (viewers[myUserId]) {
+    viewers[myUserId].position = pos;
+    renderViewers();
+  }
+}
+
+async function playVideo(videoId, seek) {
+  await ensurePlayer();
+  currentId = videoId;
+  $('#idle-screen').classList.add('hidden');
+  suppressEvents();
+  ytPlayer.loadVideoById({ videoId: videoId, startSeconds: seek || 0 });
+  setStatus('playing: ' + videoId);
+  renderQueue();
+}
+
+function playNextInQueue() {
+  var idx = queue.findIndex(function(q) { return q.videoId === currentId; });
+  if (idx >= 0 && idx < queue.length - 1) {
+    var next = queue[idx + 1];
+    playVideo(next.videoId);
+    if (isHost) broadcastSync({ state: 'playing', videoId: next.videoId, position: 0 });
+  }
+}
+
+// ─── Sync ────────────────────────────────────────────────────────────────────
+function broadcastSync(extra) {
+  if (!widgetApi) return;
+  extra = extra || {};
+  var payload = {
+    videoId: extra.videoId || currentId,
+    position: (extra.position != null) ? extra.position : (ytPlayer ? ytPlayer.getCurrentTime() || 0 : 0),
+    state: extra.state || 'playing',
+    ts: Date.now(),
+  };
+  widgetApi.sendRoomEvent(EVENT_TYPE, payload)
+    .catch(function(e) { console.warn('Failed to send sync:', e); });
+}
+
+function applySync(rawContent) {
+  if (!ytReady) return;
+  var content = validateSyncPayload(rawContent);
+  if (!content) return;
+
+  var videoId = content.videoId;
+  var position = content.position;
+  var state = content.state;
+
+  setSyncStatus('sync');
+
+  // Video change
+  if (videoId && videoId !== currentId) {
+    playVideo(videoId, position);
+    if (state === 'playing') {
+      suppressEvents();
+      ytPlayer.playVideo();
+    }
+    setSyncStatus('live');
+    return;
+  }
+
+  if (!videoId) { setSyncStatus('live'); return; }
+
+  // Drift correction — compare positions directly, add small latency estimate
+  var ESTIMATED_LATENCY = 0.3;
+  var targetPos = state === 'playing' ? position + ESTIMATED_LATENCY : position;
+  var curPos = ytPlayer.getCurrentTime() || 0;
+  var drift = Math.abs(curPos - targetPos);
+
+  if (drift > DRIFT_LIMIT) {
+    suppressEvents();
+    ytPlayer.seekTo(targetPos, true);
+  }
+
+  suppressEvents();
+  if (state === 'playing') ytPlayer.playVideo();
+  else ytPlayer.pauseVideo();
+
+  setSyncStatus('live');
+}
+
+function startTimers() {
+  if (driftTimer) clearInterval(driftTimer);
+  if (uiTimer) clearInterval(uiTimer);
+
+  driftTimer = setInterval(function() {
+    if (!isHost || !ytReady || !currentId) return;
+    if (ytPlayer.getPlayerState() === YT.PlayerState.PLAYING) broadcastSync();
+    updateControlsUI();
+  }, POLL_MS);
+
+  uiTimer = setInterval(updateControlsUI, 500);
+}
+
+// ─── Widget API init ─────────────────────────────────────────────────────────
+async function initWidget() {
+  try {
+    var WidgetApi = matrixWidgetApi.WidgetApi;
+    var WidgetApiToWidgetAction = matrixWidgetApi.WidgetApiToWidgetAction;
+
+    var params = new URLSearchParams(location.search);
+    var widgetId = params.get('widgetId') || params.get('widget_id') || 'standalone';
+
+    widgetApi = new WidgetApi(widgetId);
+
+    // Only request specific event types
+    widgetApi.requestCapabilityToSendEvent(EVENT_TYPE);
+    widgetApi.requestCapabilityToReceiveEvent(EVENT_TYPE);
+    widgetApi.requestCapabilityToSendEvent(QUEUE_TYPE);
+    widgetApi.requestCapabilityToReceiveEvent(QUEUE_TYPE);
+
+    widgetApi.on('ready', async function() {
+      try {
+        var info = await widgetApi.requestOpenIDConnectToken();
+        myUserId = info && info.matrix_server_name
+          ? '@unknown:' + info.matrix_server_name
+          : '@me:local';
+      } catch(e) {
+        console.warn('Could not get OIDC token:', e);
+        myUserId = '@me:local';
+      }
+      onReady();
+    });
+
+    widgetApi.on('action:' + WidgetApiToWidgetAction.SendEvent, function(ev) {
+      var data = (ev.detail && ev.detail.data) || {};
+      var type = data.type;
+      var content = data.content;
+      var sender = data.sender;
+      ev.preventDefault();
+      widgetApi.transport.reply(ev.detail, {});
+
+      if (type === EVENT_TYPE) {
+        if (sender) {
+          resolveHost(sender);
+          viewers[sender] = viewers[sender] || {};
+          viewers[sender].position = content ? content.position : null;
+          viewers[sender].name = sender.split(':')[0].replace('@', '');
+          viewers[sender].isHost = (sender === hostUserId);
+          renderViewers();
+        }
+        if (sender === myUserId) return;
+        if (content) applySync(content);
+      }
+
+      if (type === QUEUE_TYPE && sender !== myUserId) {
+        if (content && Array.isArray(content.queue)) {
+          queue = content.queue.filter(function(item) {
+            return item && typeof item.videoId === 'string'
+              && /^[a-zA-Z0-9_-]{11}$/.test(item.videoId);
+          });
+          renderQueue();
+        }
+      }
+    });
+
+    widgetApi.start();
+
+    setTimeout(function() {
+      if (!myUserId) {
+        console.warn('Widget API timeout — running standalone');
+        myUserId = '@standalone:local';
+        onReady();
+      }
+    }, 3000);
+
+  } catch (err) {
+    console.warn('Widget API unavailable, running standalone:', err);
+    myUserId = '@standalone:local';
+    widgetApi = null;
+    onReady();
+  }
+}
+
+function onReady() {
+  $('#not-ready').classList.add('hidden');
+
+  claimHost();
+  setStatus('ready · paste a URL to watch together');
+
+  viewers[myUserId] = {
+    name: myUserId.split(':')[0].replace('@', ''),
+    isHost: isHost,
+    color: colorFor(myUserId),
+    position: null
+  };
+  renderViewers();
+
+  setSyncStatus(widgetApi ? 'live' : 'waiting');
+
+  if (!widgetApi) {
+    toast('Running standalone (no Matrix room connected)');
+  }
+}
+
+// ─── UI Events ───────────────────────────────────────────────────────────────
+
+$('#url-form').addEventListener('submit', function(e) {
+  e.preventDefault();
+  var raw = $('#url-input').value;
+  var vid = parseYouTubeId(raw);
+  if (!vid) {
+    $('#url-input').classList.add('error');
+    setTimeout(function() { $('#url-input').classList.remove('error'); }, 600);
+    toast('Not a valid YouTube URL or video ID');
+    return;
+  }
+  var exists = queue.some(function(q) { return q.videoId === vid; });
+  if (!exists) {
+    queue.push({
+      videoId: vid,
+      title: vid,
+      addedBy: myUserId ? myUserId.split(':')[0].replace('@', '') : 'you'
+    });
+    broadcastQueue();
+    renderQueue();
+    toast('Added to queue');
+    fetchTitle(vid);
+  } else {
+    toast('Already in queue');
+  }
+  $('#url-input').value = '';
+  activateTab('queue');
+});
+
+$('#watch-now-btn').addEventListener('click', function() {
+  var raw = $('#url-input').value;
+  var vid = parseYouTubeId(raw);
+  if (!vid) {
+    $('#url-input').classList.add('error');
+    setTimeout(function() { $('#url-input').classList.remove('error'); }, 600);
+    toast('Not a valid YouTube URL or video ID');
+    return;
+  }
+  $('#url-input').value = '';
+  playVideo(vid);
+  if (isHost) broadcastSync({ state: 'playing', videoId: vid, position: 0 });
+});
+
+$('#play-pause-btn').addEventListener('click', function() {
+  if (!ytPlayer || !ytReady || !currentId) return;
+  var S = YT.PlayerState;
+  var state = ytPlayer.getPlayerState();
+  if (state === S.PLAYING) {
+    ytPlayer.pauseVideo();
+    if (isHost) broadcastSync({ state: 'paused' });
+  } else {
+    ytPlayer.playVideo();
+    if (isHost) broadcastSync({ state: 'playing' });
+  }
+});
+
+$('#progress-wrap').addEventListener('click', function(e) {
+  if (!ytReady || !currentId) return;
+  var rect = e.currentTarget.getBoundingClientRect();
+  var frac = (e.clientX - rect.left) / rect.width;
+  var dur = ytPlayer.getDuration() || 0;
+  var pos = frac * dur;
+  ytPlayer.seekTo(pos, true);
+  if (isHost) broadcastSync({ state: 'playing', position: pos });
+});
+
+$('#volume-slider').addEventListener('input', function(e) {
+  if (!ytPlayer || !ytReady) return;
+  var vol = +e.target.value;
+  ytPlayer.setVolume(vol);
+  if (vol === 0) ytPlayer.mute();
+  else ytPlayer.unMute();
+});
+
+$('#fullscreen-btn').addEventListener('click', function() {
+  var el = $('#player-area');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else el.requestFullscreen().catch(function() {});
+});
+
+document.querySelectorAll('.stab').forEach(function(tab) {
+  tab.addEventListener('click', function() { activateTab(tab.dataset.tab); });
+});
+
+function activateTab(name) {
+  document.querySelectorAll('.stab').forEach(function(t) {
+    t.classList.toggle('active', t.dataset.tab === name);
+  });
+  document.querySelectorAll('.tab-pane').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'tab-' + name);
+  });
+}
+
+// ─── Keyboard shortcuts ──────────────────────────────────────────────────────
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+  switch (e.key) {
+    case ' ':
+    case 'k':
+      e.preventDefault();
+      $('#play-pause-btn').click();
+      break;
+    case 'f':
+      e.preventDefault();
+      $('#fullscreen-btn').click();
+      break;
+    case 'ArrowLeft':
+      e.preventDefault();
+      if (ytReady && currentId) {
+        var t = Math.max(0, ytPlayer.getCurrentTime() - 10);
+        ytPlayer.seekTo(t, true);
+        if (isHost) broadcastSync({ position: t });
+      }
+      break;
+    case 'ArrowRight':
+      e.preventDefault();
+      if (ytReady && currentId) {
+        var t2 = Math.min(ytPlayer.getDuration(), ytPlayer.getCurrentTime() + 10);
+        ytPlayer.seekTo(t2, true);
+        if (isHost) broadcastSync({ position: t2 });
+      }
+      break;
+    case 'N':
+      playNextInQueue();
+      break;
+  }
+});
+
+// ─── Title fetch (CORS-safe) ─────────────────────────────────────────────────
+async function fetchTitle(videoId) {
+  var urls = [
+    'https://noembed.com/embed?url=https://youtube.com/watch?v=' + encodeURIComponent(videoId),
+    'https://www.youtube.com/oembed?url=https://youtube.com/watch?v=' + encodeURIComponent(videoId) + '&format=json',
+  ];
+  for (var u = 0; u < urls.length; u++) {
+    try {
+      var res = await fetch(urls[u]);
+      if (!res.ok) continue;
+      var data = await res.json();
+      if (data.title) {
+        var item = queue.find(function(q) { return q.videoId === videoId; });
+        if (item) {
+          item.title = data.title;
+          renderQueue();
+          broadcastQueue();
+        }
+        return;
+      }
+    } catch(e) { continue; }
+  }
+}
+
+// ─── Cleanup ─────────────────────────────────────────────────────────────────
+window.addEventListener('beforeunload', function() {
+  if (driftTimer) clearInterval(driftTimer);
+  if (uiTimer) clearInterval(uiTimer);
+  if (ytPlayer) { try { ytPlayer.destroy(); } catch(e) {} }
+});
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+initWidget();
+
+})();
+</script>
+</body>
+</html>
