@@ -574,6 +574,17 @@
 <script>
 'use strict';
 
+// 1. Extract the widgetId from the URL that Element generates
+const qs = new URLSearchParams(window.location.search);
+let widgetId = qs.get('widgetId');
+
+// 2. Provide a fallback ID just in case
+if (!widgetId) {
+    console.warn("No widget ID found in URL. Using fallback.");
+    widgetId = "test-widget";
+}
+
+// 3. NOW you can initialize the API because widgetId is defined
 const api = new window.mxwidgets.WidgetApi(widgetId);
 // ─── Constants ───────────────────────────────────────────────────────────────
 const EVENT_TYPE    = 'io.watch_together.sync';
