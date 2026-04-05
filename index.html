@@ -531,6 +531,8 @@ let viewers     = {};
 let pendingPlay = null;
 let playerInitTimer = null;
 let playerInitModeIndex = 0;
+let playerInitFailed = false;
+let usingFallbackEmbed = false;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const COLORS = ['#ff4545','#ff7043','#f0c040','#3dd68c','#4fc3f7','#ba68c8','#f06292'];
@@ -666,6 +668,8 @@ window.onYouTubeIframeAPIReady = function() {
 };
 
 function createYouTubePlayer(modeIndex) {
+  playerInitFailed = false;
+  usingFallbackEmbed = false;
   // Only send origin on http(s). file:// yields "null" which can break local embeds.
   const isHttpOrigin = /^https?:$/.test(window.location.protocol);
   const pageOrigin = isHttpOrigin ? window.location.origin : null;
@@ -718,16 +722,20 @@ function createYouTubePlayer(modeIndex) {
     if (playerInitModeIndex < modes.length - 1) {
       const nextMode = playerInitModeIndex + 1;
       console.warn('YT player not ready, retrying init mode', nextMode);
+      setStatus(`retrying player init (${nextMode + 1}/${modes.length})`);
       createYouTubePlayer(nextMode);
       return;
     }
+    playerInitFailed = true;
+    pendingPlay = null;
     setStatus('error: player initialization failed');
     toast('Player failed to initialize. Check browser console for details.', 5000);
-  }, 8000);
+  }, 4000);
 }
 
 function onYTReady() {
   ytReady = true;
+  playerInitFailed = false;
   if (playerInitTimer) clearTimeout(playerInitTimer);
 
   // FIX 3e: After player creates iframe, set referrerpolicy on it
@@ -771,6 +779,10 @@ function onYTError(e) {
     toast('Retrying player in compatibility mode…', 2500);
     createYouTubePlayer(nextMode);
     return;
+  }
+
+  if (code === 153) {
+    playerInitFailed = true;
   }
 
   // If embed blocked, try next in queue
@@ -831,6 +843,11 @@ function updateControlsUI() {
 
 function playVideo(videoId, seek) {
   if (!ytReady) {
+    if (playerInitFailed) {
+      playWithFallbackEmbed(videoId, seek || 0);
+      toast('Using fallback player mode', 2500);
+      return;
+    }
     pendingPlay = { videoId, seek: seek || 0 };
     toast(ytApiReady ? 'Player is loading, will start shortly…' : 'YouTube API still loading, please wait…');
     return;
@@ -840,6 +857,19 @@ function playVideo(videoId, seek) {
   ignoreNext = true;
   ytPlayer.loadVideoById({ videoId, startSeconds: seek || 0 });
   setStatus(`playing: ${videoId}`);
+  renderQueue();
+}
+
+function playWithFallbackEmbed(videoId, seek) {
+  const mount = $('#yt-player');
+  if (!mount) return;
+  const start = Math.max(0, Math.floor(seek || 0));
+  const src = `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&playsinline=1&rel=0&modestbranding=1&start=${start}`;
+  mount.innerHTML = `<iframe src="${src}" title="YouTube player fallback" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="origin" style="width:100%;height:100%;border:0"></iframe>`;
+  usingFallbackEmbed = true;
+  currentId = videoId;
+  $('#idle-screen').classList.add('hidden');
+  setStatus(`playing (fallback): ${videoId}`);
   renderQueue();
 }
 
