@@ -172,15 +172,14 @@
   #idle-screen p { font-size: 13px; }
   #idle-screen span { font-family: var(--font-mono); font-size: 11px; color: var(--muted); opacity: 0.7; }
 
-  /* Volume Controls */
   .volume-container {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-left: auto; /* Pushes the volume controls to the right side of the bar */
+    margin-left: auto;
     padding-left: 12px;
     border-left: 1px solid var(--border);
-  } 
+  }
 
   #mute-btn {
    background: transparent;
@@ -195,7 +194,7 @@
   #volume-slider {
    width: 80px;
     cursor: pointer;
-    accent-color: var(--accent); /* Uses your existing red accent color */
+    accent-color: var(--accent);
   }
   #controls {
     background: linear-gradient(transparent, rgba(0,0,0,0.8));
@@ -448,7 +447,12 @@
           <p>No video playing</p>
           <span>Paste a YouTube URL above to start</span>
         </div>
-        <div id="yt-player"></div>
+        <!-- FIX: yt-player is now a wrapper that always persists -->
+        <div id="yt-player-container">
+          <div id="yt-player"></div>
+        </div>
+        <!-- FIX: fallback iframe goes into a separate container -->
+        <div id="fallback-container" style="display:none; position:absolute; inset:0; z-index:1;"></div>
       </div>
       <div id="controls">
         <button class="ctrl-btn" id="play-pause-btn" title="Play/Pause">
@@ -533,6 +537,9 @@ let playerInitTimer = null;
 let playerInitModeIndex = 0;
 let playerInitFailed = false;
 let usingFallbackEmbed = false;
+// FIX: Track consecutive YT errors to avoid infinite retry loops
+let ytErrorCount = 0;
+const MAX_YT_ERRORS_BEFORE_FALLBACK = 2;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const COLORS = ['#ff4545','#ff7043','#f0c040','#3dd68c','#4fc3f7','#ba68c8','#f06292'];
@@ -570,10 +577,8 @@ function parseYouTubeId(raw) {
       return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
     }
     if (url.hostname.includes('youtube.com')) {
-      // ?v= parameter
       const v = url.searchParams.get('v');
       if (v && /^[a-zA-Z0-9_-]{11}$/.test(v)) return v;
-      // /embed/ID, /shorts/ID, /live/ID
       const match = url.pathname.match(/\/(embed|shorts|live|v)\/([a-zA-Z0-9_-]{11})/);
       if (match) return match[2];
     }
@@ -615,7 +620,6 @@ function renderViewers() {
 }
 
 // ─── Queue UI ────────────────────────────────────────────────────────────────
-// FIX 2: Completely rebuild queue-list every render — no detached-node bugs
 function renderQueue() {
   const list = $('#queue-list');
   list.innerHTML = '';
@@ -639,14 +643,12 @@ function renderQueue() {
       </div>
       <button class="queue-remove" title="Remove">✕</button>
     `;
-    // Remove button
     el.querySelector('.queue-remove').addEventListener('click', (e) => {
       e.stopPropagation();
       queue.splice(i, 1);
       renderQueue();
       broadcastQueue();
     });
-    // Click to play
     el.addEventListener('click', () => {
       playVideo(item.videoId);
       if (isHost) broadcastSync({ state: 'playing', videoId: item.videoId, position: 0 });
@@ -661,7 +663,45 @@ function broadcastQueue() {
 }
 
 // ─── YouTube Player ──────────────────────────────────────────────────────────
-// FIX 3: Add origin + host + widget_referrer to fix Error 153
+
+/*
+ * FIX (CRITICAL): Ensure the #yt-player mount-point div always exists.
+ * The old code let playWithFallbackEmbed() overwrite innerHTML of the
+ * mount target, permanently destroying <div id="yt-player">.
+ * Now we use two separate containers:
+ *   #yt-player-container  → holds the YT.Player <div id="yt-player">
+ *   #fallback-container   → holds the raw <iframe> fallback
+ * Switching between them is just toggling display.
+ */
+
+function ensureYtPlayerDiv() {
+  let el = document.getElementById('yt-player');
+  if (!el) {
+    const container = document.getElementById('yt-player-container');
+    if (container) {
+      container.innerHTML = '';
+      el = document.createElement('div');
+      el.id = 'yt-player';
+      container.appendChild(el);
+    }
+  }
+  return el;
+}
+
+function showYtPlayer() {
+  const ytc = document.getElementById('yt-player-container');
+  const fbc = document.getElementById('fallback-container');
+  if (ytc) ytc.style.display = '';
+  if (fbc) { fbc.style.display = 'none'; fbc.innerHTML = ''; }
+}
+
+function showFallback() {
+  const ytc = document.getElementById('yt-player-container');
+  const fbc = document.getElementById('fallback-container');
+  if (ytc) ytc.style.display = 'none';
+  if (fbc) fbc.style.display = '';
+}
+
 window.onYouTubeIframeAPIReady = function() {
   ytApiReady = true;
   createYouTubePlayer(0);
@@ -670,7 +710,11 @@ window.onYouTubeIframeAPIReady = function() {
 function createYouTubePlayer(modeIndex) {
   playerInitFailed = false;
   usingFallbackEmbed = false;
-  // Only send origin on http(s). file:// yields "null" which can break local embeds.
+  showYtPlayer();
+
+  // FIX: always make sure the target div exists before YT.Player tries to use it
+  ensureYtPlayerDiv();
+
   const isHttpOrigin = /^https?:$/.test(window.location.protocol);
   const pageOrigin = isHttpOrigin ? window.location.origin : null;
   const modes = [
@@ -689,32 +733,52 @@ function createYouTubePlayer(modeIndex) {
     modestbranding: 1,
     iv_load_policy: 3,
     playsinline: 1,
-    // enablejsapi is required for postMessage control
     enablejsapi: 1,
   };
   if (pageOrigin && mode.includeOrigin) {
-    // Helps YouTube validate embed source on hosted environments.
     playerVars.origin = pageOrigin;
   }
   if (pageOrigin && mode.includeWidgetReferrer) {
     playerVars.widget_referrer = pageOrigin;
   }
 
+  // FIX: Safely destroy the old player instance
   try {
-    if (ytPlayer && typeof ytPlayer.destroy === 'function') ytPlayer.destroy();
-  } catch {}
-
-  ytPlayer = new YT.Player('yt-player', {
-    height: '100%',
-    width: '100%',
-    host: mode.host,
-    playerVars,
-    events: {
-      onReady: onYTReady,
-      onStateChange: onYTStateChange,
-      onError: onYTError,
+    if (ytPlayer && typeof ytPlayer.destroy === 'function') {
+      ytPlayer.destroy();
     }
-  });
+  } catch (e) {
+    console.warn('Could not destroy old player:', e);
+  }
+  ytPlayer = null;
+  ytReady = false;
+
+  // FIX: Re-create the mount div after destroy (destroy removes the element)
+  ensureYtPlayerDiv();
+
+  try {
+    ytPlayer = new YT.Player('yt-player', {
+      height: '100%',
+      width: '100%',
+      host: mode.host,
+      playerVars,
+      events: {
+        onReady: onYTReady,
+        onStateChange: onYTStateChange,
+        onError: onYTError,
+      }
+    });
+  } catch (e) {
+    console.error('Failed to create YT.Player:', e);
+    // If constructor itself throws, go to next mode or fallback
+    if (modeIndex < modes.length - 1) {
+      setTimeout(() => createYouTubePlayer(modeIndex + 1), 500);
+    } else {
+      playerInitFailed = true;
+      handlePlayerInitFailed();
+    }
+    return;
+  }
 
   if (playerInitTimer) clearTimeout(playerInitTimer);
   playerInitTimer = setTimeout(() => {
@@ -727,47 +791,54 @@ function createYouTubePlayer(modeIndex) {
       return;
     }
     playerInitFailed = true;
-    setStatus('error: player initialization failed');
-    toast('Player API failed. Switching to fallback mode.', 3500);
-    if (pendingPlay?.videoId) {
-      const { videoId, seek } = pendingPlay;
-      pendingPlay = null;
-      playWithFallbackEmbed(videoId, seek || 0);
-    }
+    handlePlayerInitFailed();
   }, 4000);
+}
+
+// FIX: Centralized handler for "all init modes exhausted"
+function handlePlayerInitFailed() {
+  setStatus('player init failed – using fallback embed');
+  toast('Player API failed. Using fallback mode.', 3500);
+  if (pendingPlay?.videoId) {
+    const { videoId, seek } = pendingPlay;
+    pendingPlay = null;
+    playWithFallbackEmbed(videoId, seek || 0);
+  }
 }
 
 function onYTReady() {
   ytReady = true;
   playerInitFailed = false;
+  ytErrorCount = 0; // FIX: reset error counter on successful init
   if (playerInitTimer) clearTimeout(playerInitTimer);
 
-  // FIX 3e: After player creates iframe, set referrerpolicy on it
-  const iframe = document.querySelector('#yt-player iframe, #player-wrap iframe');
+  const iframe = document.querySelector('#yt-player-container iframe');
   if (iframe) {
     iframe.setAttribute('referrerpolicy', 'origin');
     iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen');
   }
 
   startDriftCheck();
-  // Apply local volume UI state to the actual player once ready.
-  ytPlayer.setVolume(localVolume);
-  if (isLocalMuted) ytPlayer.mute();
-  // If user clicked Play before ready, start it now.
+  try {
+    ytPlayer.setVolume(localVolume);
+    if (isLocalMuted) ytPlayer.mute();
+  } catch {}
+
   if (pendingPlay?.videoId) {
     const { videoId, seek } = pendingPlay;
     pendingPlay = null;
     playVideo(videoId, seek);
   }
-  console.log('YT Player ready');
+  console.log('YT Player ready (mode', playerInitModeIndex, ')');
 }
 
-// FIX 4: Handle YT errors gracefully with user feedback
 function onYTError(e) {
   const code = e.data;
   console.error('YouTube player error:', code);
+  ytErrorCount++;
+
   const messages = {
-    2:   'Invalid video ID',
+    2:   'Invalid video ID or blocked embed',
     5:   'HTML5 player error',
     100: 'Video not found or private',
     101: 'Embed not allowed by owner',
@@ -777,7 +848,27 @@ function onYTError(e) {
   toast(msg, 4000);
   setStatus('error: ' + msg);
 
-  // Error 153 and early init errors are often referrer/origin policy mismatches.
+  /*
+   * FIX: Smarter error-recovery logic.
+   *
+   * Error 2/5/153 during early init → retry next embed mode.
+   * Error 101/150               → video-specific (embed-blocked), skip to next in queue
+   *                                OR use fallback for THIS video.
+   * After MAX_YT_ERRORS_BEFORE_FALLBACK consecutive errors → switch to fallback permanently
+   *   for this session.
+   */
+
+  // If too many errors, just go fallback for everything
+  if (ytErrorCount >= MAX_YT_ERRORS_BEFORE_FALLBACK) {
+    console.warn('Too many YT errors, switching to permanent fallback');
+    playerInitFailed = true;
+    if (currentId) {
+      playWithFallbackEmbed(currentId, 0);
+    }
+    return;
+  }
+
+  // Origin/policy errors during init – retry with next mode
   if ((code === 2 || code === 5 || code === 153) && playerInitModeIndex < 3) {
     const nextMode = playerInitModeIndex + 1;
     toast('Retrying player in compatibility mode…', 2500);
@@ -785,13 +876,31 @@ function onYTError(e) {
     return;
   }
 
+  // Permanent code-153 → fallback
   if (code === 153) {
     playerInitFailed = true;
+    if (currentId) {
+      playWithFallbackEmbed(currentId, 0);
+    }
+    return;
   }
 
-  // If embed blocked, try next in queue
+  // Embed blocked for this specific video → try fallback for it, or skip
   if (code === 101 || code === 150) {
+    if (currentId) {
+      toast('Embed blocked – trying fallback player…', 2500);
+      playWithFallbackEmbed(currentId, 0);
+    } else {
+      setTimeout(() => playNextInQueue(), 1500);
+    }
+    return;
+  }
+
+  // Generic error for current video – try fallback for it
+  if (code === 100) {
+    // Video not found, skip
     setTimeout(() => playNextInQueue(), 1500);
+    return;
   }
 }
 
@@ -818,6 +927,7 @@ function onYTStateChange(e) {
 }
 
 function updateControlsUI() {
+  if (usingFallbackEmbed) return; // no API access in fallback mode
   if (!ytPlayer || !ytReady) return;
   try {
     const S = YT.PlayerState;
@@ -840,36 +950,98 @@ function updateControlsUI() {
       viewers[myUserId].position = pos;
       renderViewers();
     }
-  } catch(err) {
-    // Player might not be ready yet
-  }
+  } catch(err) {}
 }
 
 function playVideo(videoId, seek) {
+  /*
+   * FIX (CRITICAL): If we are currently in fallback mode, clean it up
+   * and try the real player first (unless playerInitFailed is permanent).
+   */
+  if (usingFallbackEmbed) {
+    // Clear fallback
+    const fbc = document.getElementById('fallback-container');
+    if (fbc) { fbc.innerHTML = ''; fbc.style.display = 'none'; }
+    usingFallbackEmbed = false;
+  }
+
   if (!ytReady) {
     if (playerInitFailed) {
       playWithFallbackEmbed(videoId, seek || 0);
-      toast('Using fallback player mode', 2500);
       return;
     }
     pendingPlay = { videoId, seek: seek || 0 };
     toast(ytApiReady ? 'Player is loading, will start shortly…' : 'YouTube API still loading, please wait…');
     return;
   }
+
   currentId = videoId;
   $('#idle-screen').classList.add('hidden');
+  showYtPlayer(); // FIX: make sure YT player container is visible
   ignoreNext = true;
-  ytPlayer.loadVideoById({ videoId, startSeconds: seek || 0 });
+
+  try {
+    ytPlayer.loadVideoById({ videoId, startSeconds: seek || 0 });
+  } catch (e) {
+    console.error('loadVideoById failed:', e);
+    playWithFallbackEmbed(videoId, seek || 0);
+    return;
+  }
+
   setStatus(`playing: ${videoId}`);
   renderQueue();
 }
 
 function playWithFallbackEmbed(videoId, seek) {
-  const mount = $('#yt-player');
-  if (!mount) return;
+  /*
+   * FIX (CRITICAL): Use the dedicated #fallback-container instead of
+   * overwriting #yt-player's innerHTML. This preserves the YT.Player
+   * mount-point so we can re-create it later if needed.
+   */
+  const fbc = document.getElementById('fallback-container');
+  if (!fbc) return;
+
+  showFallback(); // hides yt-player-container, shows fallback-container
+
+  const isHttpOrigin = /^https?:$/.test(window.location.protocol);
+  const pageOrigin = isHttpOrigin ? window.location.origin : '';
   const start = Math.max(0, Math.floor(seek || 0));
-  const src = `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&playsinline=1&rel=0&modestbranding=1&start=${start}`;
-  mount.innerHTML = `<iframe src="${src}" title="YouTube player fallback" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="origin" style="width:100%;height:100%;border:0"></iframe>`;
+  const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+  const hosts = ['https://www.youtube-nocookie.com', 'https://www.youtube.com'];
+  let hostIndex = 0;
+
+  const renderWithHost = () => {
+    const host = hosts[Math.min(hostIndex, hosts.length - 1)];
+    // FIX: fallback uses controls=1 so the user can actually interact with the video
+    const src = `${host}/embed/${encodeURIComponent(videoId)}?autoplay=1&playsinline=1&rel=0&modestbranding=1&controls=1&start=${start}${pageOrigin ? `&origin=${encodeURIComponent(pageOrigin)}` : ''}`;
+    fbc.innerHTML = `
+      <iframe
+        src="${src}"
+        title="YouTube player fallback"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+        allowfullscreen
+        referrerpolicy="origin"
+        style="width:100%;height:100%;border:0;position:absolute;inset:0"
+      ></iframe>
+      <a
+        href="${watchUrl}"
+        target="_blank"
+        rel="noopener noreferrer"
+        style="position:absolute;right:10px;bottom:10px;z-index:5;background:rgba(0,0,0,.65);color:#fff;padding:6px 10px;border-radius:6px;font-size:12px;text-decoration:none;border:1px solid rgba(255,255,255,.2)"
+      >Open on YouTube</a>
+    `;
+    const iframe = fbc.querySelector('iframe');
+    iframe?.addEventListener('error', () => {
+      if (hostIndex < hosts.length - 1) {
+        hostIndex += 1;
+        renderWithHost();
+      } else {
+        setStatus(`fallback failed · open on YouTube: ${videoId}`);
+      }
+    });
+  };
+
+  renderWithHost();
   usingFallbackEmbed = true;
   currentId = videoId;
   $('#idle-screen').classList.add('hidden');
@@ -885,6 +1057,7 @@ function playNextInQueue() {
     if (isHost) broadcastSync({ state: 'playing', videoId: next.videoId, position: 0 });
   } else {
     toast('Queue ended');
+    setStatus('queue ended');
   }
 }
 
@@ -893,7 +1066,7 @@ function broadcastSync(extra = {}) {
   if (!widgetApi) return;
   const payload = {
     videoId: currentId,
-    position: ytPlayer?.getCurrentTime() || 0,
+    position: (ytReady && ytPlayer && !usingFallbackEmbed) ? (ytPlayer.getCurrentTime() || 0) : 0,
     state: 'playing',
     ts: Date.now(),
     ...extra,
@@ -906,12 +1079,21 @@ function applySync(content) {
   if (typeof position !== 'number' || isNaN(position) || position < 0 || position > 86400) return;
   if (typeof ts !== 'number' || isNaN(ts)) return;
   if (!['playing', 'paused'].includes(state)) return;
-  if (!ytReady) return;
   if (!videoId || typeof videoId !== 'string') return;
-  // Validate video ID format
   if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return;
 
-  const adjusted = position + Math.min((Date.now() - ts) / 1000, 5); // cap adjustment at 5s
+  // FIX: If in fallback mode, we can still switch videos but can't seek/pause
+  if (usingFallbackEmbed) {
+    if (videoId !== currentId) {
+      playWithFallbackEmbed(videoId, position);
+    }
+    setSyncStatus('live');
+    return;
+  }
+
+  if (!ytReady) return;
+
+  const adjusted = position + Math.min((Date.now() - ts) / 1000, 5);
   const S = YT.PlayerState;
 
   setSyncStatus('sync');
@@ -943,7 +1125,7 @@ function applySync(content) {
 function startDriftCheck() {
   if (driftTimer) clearInterval(driftTimer);
   driftTimer = setInterval(() => {
-    if (!isHost || !ytReady || !currentId) return;
+    if (!isHost || !ytReady || !currentId || usingFallbackEmbed) return;
     try {
       const s = ytPlayer.getPlayerState();
       if (s === YT.PlayerState.PLAYING) broadcastSync();
@@ -972,7 +1154,6 @@ async function initWidget() {
 
     widgetApi = new WidgetApi(widgetId);
 
-    // FIX 5: Only request specific capabilities, not blanket ones
     widgetApi.requestCapabilityToSendEvent(EVENT_TYPE);
     widgetApi.requestCapabilityToReceiveEvent(EVENT_TYPE);
     widgetApi.requestCapabilityToSendEvent(QUEUE_TYPE);
@@ -1037,7 +1218,7 @@ function onReady() {
 
   viewers[myUserId] = { name: myUserId.split(':')[0].replace('@',''), isHost, color: colorFor(myUserId) };
   renderViewers();
-  renderQueue(); // FIX 6: Render queue on init so empty state shows
+  renderQueue();
 
   setSyncStatus(widgetApi ? 'live' : 'waiting');
 
@@ -1048,7 +1229,6 @@ function onReady() {
 
 // ─── UI Events ───────────────────────────────────────────────────────────────
 
-// FIX 7: Add to queue — auto-play first item if nothing is playing
 $('#url-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const raw = $('#url-input').value;
@@ -1067,7 +1247,6 @@ $('#url-form').addEventListener('submit', (e) => {
     toast('Added to queue');
     fetchTitle(vid);
 
-    // Auto-play if nothing is currently playing
     if (!currentId) {
       playVideo(vid);
       if (isHost) broadcastSync({ state: 'playing', videoId: vid, position: 0 });
@@ -1090,12 +1269,14 @@ $('#watch-now-btn').addEventListener('click', () => {
   }
   $('#url-input').value = '';
 
-  // Also add to queue if not there
   if (!queue.some(q => q.videoId === vid)) {
     queue.push({ videoId: vid, title: vid, addedBy: myUserId?.split(':')[0].replace('@','') || 'you' });
     broadcastQueue();
     fetchTitle(vid);
   }
+
+  // FIX: Reset error count when user explicitly requests a new video
+  ytErrorCount = 0;
 
   playVideo(vid);
   renderQueue();
@@ -1103,6 +1284,10 @@ $('#watch-now-btn').addEventListener('click', () => {
 });
 
 $('#play-pause-btn').addEventListener('click', () => {
+  if (usingFallbackEmbed) {
+    toast('Use the embedded player controls in fallback mode');
+    return;
+  }
   if (!ytPlayer || !ytReady || !currentId) return;
   const S = YT.PlayerState;
   const state = ytPlayer.getPlayerState();
@@ -1116,6 +1301,7 @@ $('#play-pause-btn').addEventListener('click', () => {
 });
 
 $('#progress-wrap').addEventListener('click', (e) => {
+  if (usingFallbackEmbed) return;
   if (!ytReady || !currentId) return;
   const rect = e.currentTarget.getBoundingClientRect();
   const frac = (e.clientX - rect.left) / rect.width;
@@ -1147,7 +1333,6 @@ const volumeSlider = document.getElementById('volume-slider');
 let isLocalMuted = false;
 let localVolume = 100;
 
-// Helper to update the button icon based on state
 function updateVolumeIcon() {
   if (isLocalMuted || localVolume === 0) {
     muteBtn.textContent = '🔇';
@@ -1158,59 +1343,43 @@ function updateVolumeIcon() {
   }
 }
 
-// Mute Toggle Event
 muteBtn.addEventListener('click', () => {
   isLocalMuted = !isLocalMuted;
-  
-  if (ytPlayer && typeof ytPlayer.mute === 'function') {
+
+  if (ytPlayer && typeof ytPlayer.mute === 'function' && !usingFallbackEmbed) {
     isLocalMuted ? ytPlayer.mute() : ytPlayer.unMute();
-    
-    // If unmuting and volume is 0, bump it up slightly so they can hear it
+
     if (!isLocalMuted && localVolume === 0) {
       localVolume = 20;
       volumeSlider.value = localVolume;
       ytPlayer.setVolume(localVolume);
     }
   }
-  
+
   updateVolumeIcon();
 });
 
-// Volume Slider Event (Triggers as the user drags)
 volumeSlider.addEventListener('input', (e) => {
   localVolume = parseInt(e.target.value, 10);
-  
-  if (ytPlayer && typeof ytPlayer.setVolume === 'function') {
+
+  if (ytPlayer && typeof ytPlayer.setVolume === 'function' && !usingFallbackEmbed) {
     ytPlayer.setVolume(localVolume);
-    
-    // If the user drags volume > 0 while muted, automatically unmute
+
     if (isLocalMuted && localVolume > 0) {
       isLocalMuted = false;
       ytPlayer.unMute();
     }
-    // If user drags volume to 0, functionally mute
     if (!isLocalMuted && localVolume === 0) {
       isLocalMuted = true;
       ytPlayer.mute();
     }
   }
-  
+
   updateVolumeIcon();
 });
 
-// Hook into onPlayerReady to ensure the player matches our initial UI state
-// (Find your existing onPlayerReady function and add these two lines at the end)
-/*
-function onPlayerReady(event) {
-  // ... existing code ...
-  ytPlayer.setVolume(localVolume);
-  if (isLocalMuted) ytPlayer.mute();
-}
-*/
-
 // ─── Title fetch ─────────────────────────────────────────────────────────────
 async function fetchTitle(videoId) {
-  // FIX 8: Use noembed.com first (more CORS-friendly), then YouTube oEmbed
   const urls = [
     `https://noembed.com/embed?url=https://youtube.com/watch?v=${encodeURIComponent(videoId)}`,
     `https://www.youtube.com/oembed?url=https://youtube.com/watch?v=${encodeURIComponent(videoId)}&format=json`,
@@ -1238,13 +1407,15 @@ initWidget();
 
 setTimeout(() => {
   if (window.__ytApiScriptFailed) {
-    toast('Could not load YouTube API script', 5000);
-    setStatus('error: YouTube API script failed to load');
+    toast('Could not load YouTube API script – using fallback mode', 5000);
+    setStatus('YouTube API script failed – fallback mode available');
+    playerInitFailed = true;
     return;
   }
   if (!ytApiReady) {
-    toast('YouTube API did not load. If testing locally, use http://localhost (not file://).', 5000);
-    setStatus('error: YouTube API failed to load');
+    toast('YouTube API did not load – fallback mode available.', 5000);
+    setStatus('YouTube API failed – fallback mode available');
+    playerInitFailed = true;
   }
 }, 7000);
 
