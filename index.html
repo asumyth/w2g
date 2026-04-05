@@ -727,9 +727,13 @@ function createYouTubePlayer(modeIndex) {
       return;
     }
     playerInitFailed = true;
-    pendingPlay = null;
     setStatus('error: player initialization failed');
-    toast('Player failed to initialize. Check browser console for details.', 5000);
+    toast('Player API failed. Switching to fallback mode.', 3500);
+    if (pendingPlay?.videoId) {
+      const { videoId, seek } = pendingPlay;
+      pendingPlay = null;
+      playWithFallbackEmbed(videoId, seek || 0);
+    }
   }, 4000);
 }
 
@@ -953,6 +957,13 @@ function startDriftCheck() {
 // ─── Matrix Widget API init ──────────────────────────────────────────────────
 async function initWidget() {
   try {
+    if (!window.matrixWidgetApi || !window.matrixWidgetApi.WidgetApi) {
+      console.warn('Matrix Widget API unavailable, running standalone');
+      myUserId = '@standalone:local';
+      widgetApi = null;
+      onReady();
+      return;
+    }
     const WidgetApi = matrixWidgetApi.WidgetApi;
     const WidgetApiToWidgetAction = matrixWidgetApi.WidgetApiToWidgetAction;
 
