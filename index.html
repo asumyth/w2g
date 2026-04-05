@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<script src="https://unpkg.com/matrix-widget-api@1.17.0/dist/api.min.js"></script>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <meta name="referrer" content="no-referrer"/>
@@ -559,8 +560,6 @@
 </div>
 
 <div id="toast"></div>
-
-<script src="https://unpkg.com/matrix-widget-api@1.17.0/dist/api.min.js"></script>
 <script>
   var tag = document.createElement('script');
   window.__ytApiScriptFailed = false;
@@ -575,6 +574,7 @@
 <script>
 'use strict';
 
+const api = new window.mxwidgets.WidgetApi(widgetId);
 // ─── Constants ───────────────────────────────────────────────────────────────
 const EVENT_TYPE    = 'io.watch_together.sync';
 const QUEUE_TYPE    = 'io.watch_together.queue';
