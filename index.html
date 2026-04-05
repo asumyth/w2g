@@ -8,11 +8,11 @@
   script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.youtube.com https://s.ytimg.com;
   frame-src https://www.youtube-nocookie.com https://www.youtube.com;
   connect-src https://noembed.com https://www.youtube.com;
-  img-src 'self' https://img.youtube.com data:;
+  img-src 'self' https://img.youtube.com https://i.ytimg.com https://i9.ytimg.com https://*.ytimg.com data:;
   style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
   font-src https://fonts.gstatic.com;
 ">
-<meta name="referrer" content="origin"/>
+<meta name="referrer" content="no-referrer"/>
 <title>Watch Together</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
 <style>
@@ -447,11 +447,9 @@
           <p>No video playing</p>
           <span>Paste a YouTube URL above to start</span>
         </div>
-        <!-- FIX: yt-player is now a wrapper that always persists -->
         <div id="yt-player-container">
           <div id="yt-player"></div>
         </div>
-        <!-- FIX: fallback iframe goes into a separate container -->
         <div id="fallback-container" style="display:none; position:absolute; inset:0; z-index:1;"></div>
       </div>
       <div id="controls">
@@ -519,6 +517,44 @@ const DRIFT_LIMIT = 2.0;
 const POLL_MS     = 5000;
 const DEBOUNCE_MS = 800;
 
+// ─── Environment detection ───────────────────────────────────────────────────
+// FIX: Detect whether we're inside an Element widget iframe.
+// Element Desktop loads widgets inside a sandboxed iframe whose origin is
+// something like "vector://vector" or a blob/null origin.  The page's own
+// location.origin will NOT match what YouTube sees, so sending `origin` to
+// YT causes Error 2 / the postMessage handshake to fail permanently.
+const IS_ELEMENT_WIDGET = (function detectElementWidget() {
+  try {
+    // Widget query-params that Element injects
+    const params = new URLSearchParams(location.search);
+    if (params.has('widgetId') || params.has('widget_id') || params.has('parentUrl')) return true;
+    // Non-http origin means we're in a sandboxed frame
+    if (!/^https?:$/.test(window.location.protocol)) return true;
+    // If we're inside an iframe whose parent is a different origin
+    if (window.self !== window.top) {
+      try { void window.parent.location.href; } catch { return true; } // cross-origin parent
+    }
+  } catch {}
+  return false;
+})();
+
+// FIX: Determine a safe origin to use.  If we're in an Element widget the
+// page origin is useless (vector://vector, null, etc.) so we use the hosting
+// URL instead.  If the page is served over https from a real domain, use that.
+const SAFE_ORIGIN = (function getSafeOrigin() {
+  // Prefer the real hosting origin when available
+  if (/^https?:$/.test(window.location.protocol)) return window.location.origin;
+  // Element sometimes passes the parent URL
+  const params = new URLSearchParams(location.search);
+  const parentUrl = params.get('parentUrl');
+  if (parentUrl) {
+    try { return new URL(parentUrl).origin; } catch {}
+  }
+  return null; // don't send origin at all
+})();
+
+console.log('[watch-together] Element widget:', IS_ELEMENT_WIDGET, '| safe origin:', SAFE_ORIGIN);
+
 // ─── State ───────────────────────────────────────────────────────────────────
 let widgetApi   = null;
 let ytPlayer    = null;
@@ -537,9 +573,8 @@ let playerInitTimer = null;
 let playerInitModeIndex = 0;
 let playerInitFailed = false;
 let usingFallbackEmbed = false;
-// FIX: Track consecutive YT errors to avoid infinite retry loops
 let ytErrorCount = 0;
-const MAX_YT_ERRORS_BEFORE_FALLBACK = 2;
+const MAX_YT_ERRORS_BEFORE_FALLBACK = 3;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const COLORS = ['#ff4545','#ff7043','#f0c040','#3dd68c','#4fc3f7','#ba68c8','#f06292'];
@@ -636,7 +671,8 @@ function renderQueue() {
     const el = document.createElement('div');
     el.className = 'queue-item' + (item.videoId === currentId ? ' playing' : '');
     el.innerHTML = `
-      <div class="queue-thumb"><img src="https://img.youtube.com/vi/${encodeURIComponent(item.videoId)}/mqdefault.jpg" loading="lazy" alt=""/></div>
+      <div class="queue-thumb"><img src="https://img.youtube.com/vi/${encodeURIComponent(item.videoId)}/mqdefault.jpg" loading="lazy" alt=""
+        onerror="this.onerror=null;this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 48 32%22><rect fill=%22%231f1f24%22 width=%2248%22 height=%2232%22/><text x=%2224%22 y=%2220%22 fill=%22%236b6b78%22 font-size=%2210%22 text-anchor=%22middle%22>?</text></svg>'"/></div>
       <div class="queue-meta">
         <div class="queue-title">${esc(item.title || item.videoId)}</div>
         <div class="queue-added">by ${esc(item.addedBy || 'someone')}</div>
@@ -663,16 +699,6 @@ function broadcastQueue() {
 }
 
 // ─── YouTube Player ──────────────────────────────────────────────────────────
-
-/*
- * FIX (CRITICAL): Ensure the #yt-player mount-point div always exists.
- * The old code let playWithFallbackEmbed() overwrite innerHTML of the
- * mount target, permanently destroying <div id="yt-player">.
- * Now we use two separate containers:
- *   #yt-player-container  → holds the YT.Player <div id="yt-player">
- *   #fallback-container   → holds the raw <iframe> fallback
- * Switching between them is just toggling display.
- */
 
 function ensureYtPlayerDiv() {
   let el = document.getElementById('yt-player');
@@ -703,28 +729,49 @@ function showFallback() {
 }
 
 window.onYouTubeIframeAPIReady = function() {
+  console.log('[watch-together] YT IFrame API ready');
   ytApiReady = true;
   createYouTubePlayer(0);
 };
 
+/*
+ * FIX (CORE): The init modes are completely redesigned.
+ *
+ * The old code always tried sending `origin = window.location.origin`.
+ * Inside Element Desktop's widget iframe the origin is something like
+ * "vector://vector" or "null" — YouTube rejects this, the postMessage
+ * handshake fails, onReady never fires, and all 4 modes timeout.
+ *
+ * New strategy:
+ *   Mode 0: youtube-nocookie, NO origin, NO widget_referrer  (cleanest for sandboxed frames)
+ *   Mode 1: youtube.com,      NO origin, NO widget_referrer
+ *   Mode 2: youtube.com,      WITH origin (only if we have a real https origin)
+ *   Mode 3: youtube-nocookie, WITH origin (only if we have a real https origin)
+ *
+ * Additionally we catch the constructor throw and move on immediately
+ * instead of waiting for the 4s timeout.
+ */
 function createYouTubePlayer(modeIndex) {
   playerInitFailed = false;
   usingFallbackEmbed = false;
   showYtPlayer();
-
-  // FIX: always make sure the target div exists before YT.Player tries to use it
   ensureYtPlayerDiv();
 
-  const isHttpOrigin = /^https?:$/.test(window.location.protocol);
-  const pageOrigin = isHttpOrigin ? window.location.origin : null;
   const modes = [
-    { host: 'https://www.youtube-nocookie.com', includeOrigin: true, includeWidgetReferrer: true },
-    { host: 'https://www.youtube.com',          includeOrigin: true, includeWidgetReferrer: true },
-    { host: 'https://www.youtube.com',          includeOrigin: true, includeWidgetReferrer: false },
-    { host: 'https://www.youtube.com',          includeOrigin: false, includeWidgetReferrer: false },
+    // Mode 0: No origin at all — works best in sandboxed/widget iframes
+    { host: 'https://www.youtube-nocookie.com', origin: null, widgetRef: null },
+    // Mode 1: Plain youtube.com, no origin
+    { host: 'https://www.youtube.com',          origin: null, widgetRef: null },
+    // Mode 2: youtube.com with real origin (only useful on actual https hosting)
+    { host: 'https://www.youtube.com',          origin: SAFE_ORIGIN, widgetRef: null },
+    // Mode 3: nocookie with real origin
+    { host: 'https://www.youtube-nocookie.com',  origin: SAFE_ORIGIN, widgetRef: SAFE_ORIGIN },
   ];
+
   const mode = modes[Math.min(modeIndex, modes.length - 1)];
   playerInitModeIndex = Math.min(modeIndex, modes.length - 1);
+
+  console.log(`[watch-together] Creating YT player mode ${playerInitModeIndex}:`, mode);
 
   const playerVars = {
     autoplay: 0,
@@ -734,26 +781,31 @@ function createYouTubePlayer(modeIndex) {
     iv_load_policy: 3,
     playsinline: 1,
     enablejsapi: 1,
+    // FIX: Disable the "More videos" overlay that causes click-jacking issues
+    fs: 0,
   };
-  if (pageOrigin && mode.includeOrigin) {
-    playerVars.origin = pageOrigin;
+
+  // FIX: Only add origin if we actually have one AND it's a real https origin.
+  // Sending a bad/null/vector:// origin is what kills the postMessage bridge.
+  if (mode.origin && /^https:/.test(mode.origin)) {
+    playerVars.origin = mode.origin;
   }
-  if (pageOrigin && mode.includeWidgetReferrer) {
-    playerVars.widget_referrer = pageOrigin;
+  if (mode.widgetRef && /^https:/.test(mode.widgetRef)) {
+    playerVars.widget_referrer = mode.widgetRef;
   }
 
-  // FIX: Safely destroy the old player instance
+  // Destroy old player safely
   try {
     if (ytPlayer && typeof ytPlayer.destroy === 'function') {
       ytPlayer.destroy();
     }
   } catch (e) {
-    console.warn('Could not destroy old player:', e);
+    console.warn('[watch-together] Could not destroy old player:', e);
   }
   ytPlayer = null;
   ytReady = false;
 
-  // FIX: Re-create the mount div after destroy (destroy removes the element)
+  // Re-create mount div after destroy
   ensureYtPlayerDiv();
 
   try {
@@ -769,10 +821,10 @@ function createYouTubePlayer(modeIndex) {
       }
     });
   } catch (e) {
-    console.error('Failed to create YT.Player:', e);
-    // If constructor itself throws, go to next mode or fallback
-    if (modeIndex < modes.length - 1) {
-      setTimeout(() => createYouTubePlayer(modeIndex + 1), 500);
+    console.error('[watch-together] YT.Player constructor threw:', e);
+    // Don't wait for timeout — immediately try next mode
+    if (playerInitModeIndex < modes.length - 1) {
+      setTimeout(() => createYouTubePlayer(playerInitModeIndex + 1), 300);
     } else {
       playerInitFailed = true;
       handlePlayerInitFailed();
@@ -780,25 +832,39 @@ function createYouTubePlayer(modeIndex) {
     return;
   }
 
+  // FIX: After the player creates its iframe, patch its attributes
+  // Use a short delay to let YT.Player inject the iframe
+  setTimeout(() => {
+    const iframe = document.querySelector('#yt-player-container iframe');
+    if (iframe) {
+      // FIX: Remove referrerpolicy or set to no-referrer so YouTube
+      // doesn't get a mismatched referrer from the widget sandbox
+      iframe.setAttribute('referrerpolicy', 'no-referrer');
+      iframe.removeAttribute('sandbox'); // Element may add sandbox; we need postMessage
+      iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen; autoplay');
+    }
+  }, 500);
+
   if (playerInitTimer) clearTimeout(playerInitTimer);
   playerInitTimer = setTimeout(() => {
     if (ytReady) return;
-    if (playerInitModeIndex < modes.length - 1) {
+    const modes_count = modes.length;
+    if (playerInitModeIndex < modes_count - 1) {
       const nextMode = playerInitModeIndex + 1;
-      console.warn('YT player not ready, retrying init mode', nextMode);
-      setStatus(`retrying player init (${nextMode + 1}/${modes.length})`);
+      console.warn(`[watch-together] YT player not ready, retrying init mode ${nextMode}`);
+      setStatus(`retrying player init (${nextMode + 1}/${modes_count})`);
       createYouTubePlayer(nextMode);
       return;
     }
+    console.warn('[watch-together] All YT player init modes exhausted');
     playerInitFailed = true;
     handlePlayerInitFailed();
-  }, 4000);
+  }, 5000); // FIX: Increased timeout from 4s to 5s — Element widget frames are slower
 }
 
-// FIX: Centralized handler for "all init modes exhausted"
 function handlePlayerInitFailed() {
-  setStatus('player init failed – using fallback embed');
-  toast('Player API failed. Using fallback mode.', 3500);
+  setStatus('YT API unavailable — using fallback player');
+  toast('YouTube API could not init. Using fallback embed with native controls.', 4000);
   if (pendingPlay?.videoId) {
     const { videoId, seek } = pendingPlay;
     pendingPlay = null;
@@ -809,12 +875,15 @@ function handlePlayerInitFailed() {
 function onYTReady() {
   ytReady = true;
   playerInitFailed = false;
-  ytErrorCount = 0; // FIX: reset error counter on successful init
+  ytErrorCount = 0;
   if (playerInitTimer) clearTimeout(playerInitTimer);
 
+  console.log('[watch-together] YT Player ready (mode', playerInitModeIndex, ')');
+
+  // Patch iframe attributes now that it's definitely in the DOM
   const iframe = document.querySelector('#yt-player-container iframe');
   if (iframe) {
-    iframe.setAttribute('referrerpolicy', 'origin');
+    iframe.setAttribute('referrerpolicy', 'no-referrer');
     iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen');
   }
 
@@ -829,16 +898,18 @@ function onYTReady() {
     pendingPlay = null;
     playVideo(videoId, seek);
   }
-  console.log('YT Player ready (mode', playerInitModeIndex, ')');
+
+  setStatus('player ready · paste a URL to watch together');
+  toast('Player connected!', 1500);
 }
 
 function onYTError(e) {
   const code = e.data;
-  console.error('YouTube player error:', code);
+  console.error('[watch-together] YouTube player error:', code);
   ytErrorCount++;
 
   const messages = {
-    2:   'Invalid video ID or blocked embed',
+    2:   'Invalid parameter / blocked embed',
     5:   'HTML5 player error',
     100: 'Video not found or private',
     101: 'Embed not allowed by owner',
@@ -848,19 +919,9 @@ function onYTError(e) {
   toast(msg, 4000);
   setStatus('error: ' + msg);
 
-  /*
-   * FIX: Smarter error-recovery logic.
-   *
-   * Error 2/5/153 during early init → retry next embed mode.
-   * Error 101/150               → video-specific (embed-blocked), skip to next in queue
-   *                                OR use fallback for THIS video.
-   * After MAX_YT_ERRORS_BEFORE_FALLBACK consecutive errors → switch to fallback permanently
-   *   for this session.
-   */
-
-  // If too many errors, just go fallback for everything
+  // Too many consecutive errors → permanent fallback
   if (ytErrorCount >= MAX_YT_ERRORS_BEFORE_FALLBACK) {
-    console.warn('Too many YT errors, switching to permanent fallback');
+    console.warn('[watch-together] Too many YT errors, switching to permanent fallback');
     playerInitFailed = true;
     if (currentId) {
       playWithFallbackEmbed(currentId, 0);
@@ -868,7 +929,7 @@ function onYTError(e) {
     return;
   }
 
-  // Origin/policy errors during init – retry with next mode
+  // Origin/policy errors → retry next init mode
   if ((code === 2 || code === 5 || code === 153) && playerInitModeIndex < 3) {
     const nextMode = playerInitModeIndex + 1;
     toast('Retrying player in compatibility mode…', 2500);
@@ -876,19 +937,17 @@ function onYTError(e) {
     return;
   }
 
-  // Permanent code-153 → fallback
+  // Permanent init failure
   if (code === 153) {
     playerInitFailed = true;
-    if (currentId) {
-      playWithFallbackEmbed(currentId, 0);
-    }
+    if (currentId) playWithFallbackEmbed(currentId, 0);
     return;
   }
 
-  // Embed blocked for this specific video → try fallback for it, or skip
+  // Embed blocked for this video → fallback for it
   if (code === 101 || code === 150) {
     if (currentId) {
-      toast('Embed blocked – trying fallback player…', 2500);
+      toast('Embed blocked — trying fallback player…', 2500);
       playWithFallbackEmbed(currentId, 0);
     } else {
       setTimeout(() => playNextInQueue(), 1500);
@@ -896,9 +955,8 @@ function onYTError(e) {
     return;
   }
 
-  // Generic error for current video – try fallback for it
+  // Not found → skip
   if (code === 100) {
-    // Video not found, skip
     setTimeout(() => playNextInQueue(), 1500);
     return;
   }
@@ -927,7 +985,7 @@ function onYTStateChange(e) {
 }
 
 function updateControlsUI() {
-  if (usingFallbackEmbed) return; // no API access in fallback mode
+  if (usingFallbackEmbed) return;
   if (!ytPlayer || !ytReady) return;
   try {
     const S = YT.PlayerState;
@@ -954,12 +1012,8 @@ function updateControlsUI() {
 }
 
 function playVideo(videoId, seek) {
-  /*
-   * FIX (CRITICAL): If we are currently in fallback mode, clean it up
-   * and try the real player first (unless playerInitFailed is permanent).
-   */
+  // Clean up fallback if active
   if (usingFallbackEmbed) {
-    // Clear fallback
     const fbc = document.getElementById('fallback-container');
     if (fbc) { fbc.innerHTML = ''; fbc.style.display = 'none'; }
     usingFallbackEmbed = false;
@@ -971,19 +1025,19 @@ function playVideo(videoId, seek) {
       return;
     }
     pendingPlay = { videoId, seek: seek || 0 };
-    toast(ytApiReady ? 'Player is loading, will start shortly…' : 'YouTube API still loading, please wait…');
+    toast(ytApiReady ? 'Player is loading, will start shortly…' : 'YouTube API still loading…');
     return;
   }
 
   currentId = videoId;
   $('#idle-screen').classList.add('hidden');
-  showYtPlayer(); // FIX: make sure YT player container is visible
+  showYtPlayer();
   ignoreNext = true;
 
   try {
     ytPlayer.loadVideoById({ videoId, startSeconds: seek || 0 });
   } catch (e) {
-    console.error('loadVideoById failed:', e);
+    console.error('[watch-together] loadVideoById failed:', e);
     playWithFallbackEmbed(videoId, seek || 0);
     return;
   }
@@ -993,18 +1047,11 @@ function playVideo(videoId, seek) {
 }
 
 function playWithFallbackEmbed(videoId, seek) {
-  /*
-   * FIX (CRITICAL): Use the dedicated #fallback-container instead of
-   * overwriting #yt-player's innerHTML. This preserves the YT.Player
-   * mount-point so we can re-create it later if needed.
-   */
   const fbc = document.getElementById('fallback-container');
   if (!fbc) return;
 
-  showFallback(); // hides yt-player-container, shows fallback-container
+  showFallback();
 
-  const isHttpOrigin = /^https?:$/.test(window.location.protocol);
-  const pageOrigin = isHttpOrigin ? window.location.origin : '';
   const start = Math.max(0, Math.floor(seek || 0));
   const watchUrl = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
   const hosts = ['https://www.youtube-nocookie.com', 'https://www.youtube.com'];
@@ -1012,23 +1059,24 @@ function playWithFallbackEmbed(videoId, seek) {
 
   const renderWithHost = () => {
     const host = hosts[Math.min(hostIndex, hosts.length - 1)];
-    // FIX: fallback uses controls=1 so the user can actually interact with the video
-    const src = `${host}/embed/${encodeURIComponent(videoId)}?autoplay=1&playsinline=1&rel=0&modestbranding=1&controls=1&start=${start}${pageOrigin ? `&origin=${encodeURIComponent(pageOrigin)}` : ''}`;
+    // FIX: In fallback mode do NOT send origin at all — let YouTube figure it out.
+    // Also enable controls=1 so user can interact, and autoplay=1.
+    const src = `${host}/embed/${encodeURIComponent(videoId)}?autoplay=1&playsinline=1&rel=0&modestbranding=1&controls=1&start=${start}`;
     fbc.innerHTML = `
       <iframe
         src="${src}"
-        title="YouTube player fallback"
+        title="YouTube player (fallback)"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
         allowfullscreen
-        referrerpolicy="origin"
+        referrerpolicy="no-referrer"
         style="width:100%;height:100%;border:0;position:absolute;inset:0"
       ></iframe>
       <a
         href="${watchUrl}"
         target="_blank"
         rel="noopener noreferrer"
-        style="position:absolute;right:10px;bottom:10px;z-index:5;background:rgba(0,0,0,.65);color:#fff;padding:6px 10px;border-radius:6px;font-size:12px;text-decoration:none;border:1px solid rgba(255,255,255,.2)"
-      >Open on YouTube</a>
+        style="position:absolute;right:10px;bottom:50px;z-index:5;background:rgba(0,0,0,.65);color:#fff;padding:6px 10px;border-radius:6px;font-size:12px;text-decoration:none;border:1px solid rgba(255,255,255,.2)"
+      >Open on YouTube ↗</a>
     `;
     const iframe = fbc.querySelector('iframe');
     iframe?.addEventListener('error', () => {
@@ -1082,7 +1130,7 @@ function applySync(content) {
   if (!videoId || typeof videoId !== 'string') return;
   if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return;
 
-  // FIX: If in fallback mode, we can still switch videos but can't seek/pause
+  // In fallback mode we can only switch videos
   if (usingFallbackEmbed) {
     if (videoId !== currentId) {
       playWithFallbackEmbed(videoId, position);
@@ -1275,9 +1323,7 @@ $('#watch-now-btn').addEventListener('click', () => {
     fetchTitle(vid);
   }
 
-  // FIX: Reset error count when user explicitly requests a new video
   ytErrorCount = 0;
-
   playVideo(vid);
   renderQueue();
   if (isHost) broadcastSync({ state: 'playing', videoId: vid, position: 0 });
@@ -1285,7 +1331,7 @@ $('#watch-now-btn').addEventListener('click', () => {
 
 $('#play-pause-btn').addEventListener('click', () => {
   if (usingFallbackEmbed) {
-    toast('Use the embedded player controls in fallback mode');
+    toast('Use the YouTube controls in fallback mode');
     return;
   }
   if (!ytPlayer || !ytReady || !currentId) return;
@@ -1348,7 +1394,6 @@ muteBtn.addEventListener('click', () => {
 
   if (ytPlayer && typeof ytPlayer.mute === 'function' && !usingFallbackEmbed) {
     isLocalMuted ? ytPlayer.mute() : ytPlayer.unMute();
-
     if (!isLocalMuted && localVolume === 0) {
       localVolume = 20;
       volumeSlider.value = localVolume;
@@ -1364,7 +1409,6 @@ volumeSlider.addEventListener('input', (e) => {
 
   if (ytPlayer && typeof ytPlayer.setVolume === 'function' && !usingFallbackEmbed) {
     ytPlayer.setVolume(localVolume);
-
     if (isLocalMuted && localVolume > 0) {
       isLocalMuted = false;
       ytPlayer.unMute();
@@ -1380,25 +1424,22 @@ volumeSlider.addEventListener('input', (e) => {
 
 // ─── Title fetch ─────────────────────────────────────────────────────────────
 async function fetchTitle(videoId) {
-  const urls = [
-    `https://noembed.com/embed?url=https://youtube.com/watch?v=${encodeURIComponent(videoId)}`,
-    `https://www.youtube.com/oembed?url=https://youtube.com/watch?v=${encodeURIComponent(videoId)}&format=json`,
-  ];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (data.title) {
-        const item = queue.find(q => q.videoId === videoId);
-        if (item) {
-          item.title = data.title;
-          renderQueue();
-          broadcastQueue();
-        }
-        return;
+  // FIX: Only use noembed.com — youtube.com/oembed is blocked by CORB
+  // in cross-origin widget contexts.
+  try {
+    const res = await fetch(`https://noembed.com/embed?url=https://youtube.com/watch?v=${encodeURIComponent(videoId)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.title) {
+      const item = queue.find(q => q.videoId === videoId);
+      if (item) {
+        item.title = data.title;
+        renderQueue();
+        broadcastQueue();
       }
-    } catch { continue; }
+    }
+  } catch (e) {
+    console.warn('[watch-together] Title fetch failed (CORB or network):', e);
   }
 }
 
@@ -1407,14 +1448,14 @@ initWidget();
 
 setTimeout(() => {
   if (window.__ytApiScriptFailed) {
-    toast('Could not load YouTube API script – using fallback mode', 5000);
-    setStatus('YouTube API script failed – fallback mode available');
+    toast('Could not load YouTube API script — fallback mode available', 5000);
+    setStatus('YouTube API script failed — fallback available');
     playerInitFailed = true;
     return;
   }
   if (!ytApiReady) {
-    toast('YouTube API did not load – fallback mode available.', 5000);
-    setStatus('YouTube API failed – fallback mode available');
+    toast('YouTube API did not load — fallback mode available', 5000);
+    setStatus('YouTube API failed — fallback available');
     playerInitFailed = true;
   }
 }, 7000);
