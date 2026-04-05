@@ -3,15 +3,6 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<meta http-equiv="Content-Security-Policy" content="
-  default-src 'none';
-  script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.youtube.com https://s.ytimg.com;
-  frame-src https://www.youtube-nocookie.com https://www.youtube.com;
-  connect-src https://noembed.com https://www.youtube.com;
-  img-src 'self' https://img.youtube.com https://i.ytimg.com https://i9.ytimg.com https://*.ytimg.com data:;
-  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
-  font-src https://fonts.gstatic.com;
-">
 <meta name="referrer" content="no-referrer"/>
 <title>Watch Together</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
@@ -154,9 +145,13 @@
     position: relative;
     background: #000;
   }
-  #player-wrap iframe, #player-wrap > div {
+  #yt-player-container {
     position: absolute; inset: 0;
     width: 100%; height: 100%;
+  }
+  #yt-player, #yt-player iframe {
+    width: 100%; height: 100%;
+    position: absolute; inset: 0;
   }
   #idle-screen {
     position: absolute; inset: 0;
@@ -406,6 +401,67 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* ── Chat ── */
+  #chat-messages {
+    flex: 1; overflow-y: auto;
+    padding: 8px 0;
+    display: flex; flex-direction: column; gap: 2px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .chat-msg {
+    padding: 3px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .chat-msg-name {
+    font-weight: 500;
+    font-size: 11px;
+    margin-right: 4px;
+  }
+  .chat-msg-text { color: var(--text); word-break: break-word; }
+  .chat-msg-time {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--muted);
+    margin-left: 4px;
+    vertical-align: middle;
+  }
+  .chat-system {
+    padding: 3px 12px;
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+  }
+  #chat-form {
+    display: flex; gap: 6px;
+    padding: 8px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #chat-input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 5px 8px;
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 12px;
+    outline: none;
+    min-width: 0;
+  }
+  #chat-input:focus { border-color: var(--accent); }
+  #chat-badge {
+    background: var(--accent);
+    color: #fff;
+    font-size: 9px;
+    padding: 0 4px;
+    border-radius: 8px;
+    font-family: var(--font-mono);
+    vertical-align: middle;
+  }
+
   @media (max-width: 600px) {
     main { grid-template-columns: 1fr !important; grid-template-rows: 1fr auto; }
     #sidebar { border-left: none; border-top: 1px solid var(--border); max-height: 180px; }
@@ -447,8 +503,8 @@
           <p>No video playing</p>
           <span>Paste a YouTube URL above to start</span>
         </div>
-        <div id="yt-player-container">
-          <div id="yt-player"></div>
+        <div id="yt-player-container" style="position:absolute;inset:0;width:100%;height:100%;">
+          <div id="yt-player" style="width:100%;height:100%;"></div>
         </div>
         <div id="fallback-container" style="display:none; position:absolute; inset:0; z-index:1;"></div>
       </div>
@@ -475,6 +531,7 @@
       <div class="sidebar-tabs">
         <div class="stab active" data-tab="viewers">VIEWERS</div>
         <div class="stab" data-tab="queue">QUEUE</div>
+        <div class="stab" data-tab="chat">CHAT <span id="chat-badge" style="display:none"></span></div>
       </div>
 
       <div class="tab-pane active" id="tab-viewers">
@@ -483,6 +540,14 @@
 
       <div class="tab-pane" id="tab-queue">
         <div id="queue-list"></div>
+      </div>
+
+      <div class="tab-pane" id="tab-chat">
+        <div id="chat-messages"></div>
+        <form id="chat-form">
+          <input id="chat-input" type="text" placeholder="Say something…" autocomplete="off" maxlength="300"/>
+          <button class="btn" type="submit" style="padding:6px 10px;flex-shrink:0">↑</button>
+        </form>
       </div>
     </div>
   </main>
@@ -511,49 +576,20 @@
 'use strict';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const EVENT_TYPE  = 'io.watch_together.sync';
-const QUEUE_TYPE  = 'io.watch_together.queue';
-const DRIFT_LIMIT = 2.0;
-const POLL_MS     = 5000;
-const DEBOUNCE_MS = 800;
+const EVENT_TYPE    = 'io.watch_together.sync';
+const QUEUE_TYPE    = 'io.watch_together.queue';
+const PRESENCE_TYPE = 'io.watch_together.presence';
+const CHAT_TYPE     = 'io.watch_together.chat';
+const DRIFT_LIMIT   = 2.0;
+const POLL_MS       = 5000;
+const DEBOUNCE_MS   = 800;
+const PRESENCE_MS   = 12000;  // broadcast presence every 12s
+const PRESENCE_TTL  = 35000;  // remove viewer if silent for 35s
 
-// ─── Environment detection ───────────────────────────────────────────────────
-// FIX: Detect whether we're inside an Element widget iframe.
-// Element Desktop loads widgets inside a sandboxed iframe whose origin is
-// something like "vector://vector" or a blob/null origin.  The page's own
-// location.origin will NOT match what YouTube sees, so sending `origin` to
-// YT causes Error 2 / the postMessage handshake to fail permanently.
-const IS_ELEMENT_WIDGET = (function detectElementWidget() {
-  try {
-    // Widget query-params that Element injects
-    const params = new URLSearchParams(location.search);
-    if (params.has('widgetId') || params.has('widget_id') || params.has('parentUrl')) return true;
-    // Non-http origin means we're in a sandboxed frame
-    if (!/^https?:$/.test(window.location.protocol)) return true;
-    // If we're inside an iframe whose parent is a different origin
-    if (window.self !== window.top) {
-      try { void window.parent.location.href; } catch { return true; } // cross-origin parent
-    }
-  } catch {}
-  return false;
-})();
-
-// FIX: Determine a safe origin to use.  If we're in an Element widget the
-// page origin is useless (vector://vector, null, etc.) so we use the hosting
-// URL instead.  If the page is served over https from a real domain, use that.
-const SAFE_ORIGIN = (function getSafeOrigin() {
-  // Prefer the real hosting origin when available
-  if (/^https?:$/.test(window.location.protocol)) return window.location.origin;
-  // Element sometimes passes the parent URL
-  const params = new URLSearchParams(location.search);
-  const parentUrl = params.get('parentUrl');
-  if (parentUrl) {
-    try { return new URL(parentUrl).origin; } catch {}
-  }
-  return null; // don't send origin at all
-})();
-
-console.log('[watch-together] Element widget:', IS_ELEMENT_WIDGET, '| safe origin:', SAFE_ORIGIN);
+// ─── Environment detection ────────────────────────────────────────────────────
+// Detect if we're served over a real https origin (needed for title fetch CORS)
+const SAFE_ORIGIN = /^https:/.test(window.location.protocol) ? window.location.origin : null;
+console.log('[watch-together] safe origin:', SAFE_ORIGIN);
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let widgetApi   = null;
@@ -562,19 +598,24 @@ let ytReady     = false;
 let ytApiReady  = false;
 let isHost      = false;
 let myUserId    = null;
+let myJoinedAt  = null;   // timestamp when we joined — used for host election
 let currentId   = null;
 let lastSentTs  = 0;
 let ignoreNext  = false;
 let driftTimer  = null;
+let presenceTimer = null;
 let queue       = [];
-let viewers     = {};
+let viewers     = {};    // uid -> { name, position, joinedAt, lastSeen, isHost, color }
+let chatMessages = [];
+let unreadChat  = 0;
+let chatOpen    = false;
 let pendingPlay = null;
-let playerInitTimer = null;
-let playerInitModeIndex = 0;
+let playerInitTimer  = null;
 let playerInitFailed = false;
 let usingFallbackEmbed = false;
 let ytErrorCount = 0;
-const MAX_YT_ERRORS_BEFORE_FALLBACK = 3;
+let isLocalMuted = false;
+let localVolume  = 100;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const COLORS = ['#ff4545','#ff7043','#f0c040','#3dd68c','#4fc3f7','#ba68c8','#f06292'];
@@ -631,27 +672,153 @@ function setSyncStatus(state) {
 
 function setStatus(msg) { $('#status-text').textContent = msg; }
 
-// ─── Viewers UI ──────────────────────────────────────────────────────────────
+// ─── Host election ────────────────────────────────────────────────────────────
+// Host = viewer with the smallest joinedAt (first to arrive).
+// Completely deterministic — no coordination messages needed.
+function electHost() {
+  const alive = Object.entries(viewers);
+  if (alive.length === 0) { isHost = true; return; }
+  let hostUid = alive[0][0];
+  let oldest  = alive[0][1].joinedAt || Infinity;
+  for (const [uid, v] of alive) {
+    if ((v.joinedAt || Infinity) < oldest) { oldest = v.joinedAt; hostUid = uid; }
+  }
+  const wasHost = isHost;
+  isHost = (hostUid === myUserId);
+  if (isHost !== wasHost) {
+    $('#host-badge').style.display = isHost ? '' : 'none';
+    toast(isHost ? 'You are now the host' : `${viewers[hostUid]?.name || hostUid.split(':')[0].replace('@','')} is now host`);
+    if (isHost) startDriftCheck(); // restart broadcaster
+  }
+}
+
+// ─── Presence ─────────────────────────────────────────────────────────────────
+function broadcastPresence() {
+  if (!widgetApi) return;
+  widgetApi.sendRoomEvent(PRESENCE_TYPE, {
+    userId:   myUserId,
+    name:     myUserId.split(':')[0].replace('@',''),
+    joinedAt: myJoinedAt,
+    position: (ytReady && ytPlayer && !usingFallbackEmbed) ? (ytPlayer.getCurrentTime() || 0) : null,
+    videoId:  currentId,
+    ts:       Date.now(),
+  }).catch(() => {});
+}
+
+function startPresence() {
+  broadcastPresence(); // announce immediately
+  if (presenceTimer) clearInterval(presenceTimer);
+  presenceTimer = setInterval(() => {
+    broadcastPresence();
+    pruneViewers();
+  }, PRESENCE_MS);
+}
+
+function pruneViewers() {
+  const now = Date.now();
+  let changed = false;
+  for (const [uid, v] of Object.entries(viewers)) {
+    if (uid === myUserId) continue;
+    if (now - (v.lastSeen || 0) > PRESENCE_TTL) {
+      delete viewers[uid];
+      changed = true;
+    }
+  }
+  if (changed) { electHost(); renderViewers(); }
+}
+
+function applyPresence(data, sender) {
+  const uid = sender || data.userId;
+  if (!uid) return;
+  const existing = viewers[uid];
+  const isNew = !existing;
+  viewers[uid] = {
+    ...(existing || {}),
+    name:     data.name || uid.split(':')[0].replace('@',''),
+    joinedAt: data.joinedAt || existing?.joinedAt || data.ts || Date.now(),
+    lastSeen: Date.now(),
+    position: data.position ?? existing?.position,
+    color:    colorFor(uid),
+  };
+  if (isNew) {
+    addSystemMessage(`${viewers[uid].name} joined`);
+  }
+  electHost();
+  renderViewers();
+}
+
+// ─── Viewers UI ───────────────────────────────────────────────────────────────
 function renderViewers() {
   const list = $('#viewers-list');
   list.innerHTML = '';
-  const count = Object.keys(viewers).length;
-  $('#viewer-count').textContent = `${count} watching`;
+  const entries = Object.entries(viewers);
+  $('#viewer-count').textContent = `${entries.length} watching`;
 
-  Object.entries(viewers).forEach(([uid, v]) => {
+  // Sort: host first, then by joinedAt
+  entries.sort(([,a],[,b]) => (a.joinedAt||0) - (b.joinedAt||0));
+
+  for (const [uid, v] of entries) {
     const isMe = uid === myUserId;
+    const hostUid = entries[0]?.[0]; // first entry after sort = host
+    const isThisHost = uid === hostUid;
     const row = document.createElement('div');
     row.className = 'viewer-row';
     row.innerHTML = `
-      <div class="avatar" style="background:${colorFor(uid)};color:#fff;border-color:${colorFor(uid)}">
+      <div class="avatar" style="background:${colorFor(uid)};color:#fff;border-color:${colorFor(uid)}40">
         ${esc(initials(uid))}
       </div>
       <span class="viewer-name">${esc(v.name || uid.split(':')[0].replace('@',''))}${isMe?' (you)':''}</span>
-      ${v.isHost ? '<span class="host-tag">HOST</span>' : ''}
+      ${isThisHost ? '<span class="host-tag">HOST</span>' : ''}
       ${v.position != null ? `<span class="viewer-pos">${fmtTime(v.position)}</span>` : ''}
     `;
     list.appendChild(row);
-  });
+  }
+}
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+function broadcastChat(text) {
+  if (!widgetApi || !text.trim()) return;
+  widgetApi.sendRoomEvent(CHAT_TYPE, {
+    userId: myUserId,
+    name:   myUserId.split(':')[0].replace('@',''),
+    text:   text.trim().slice(0, 300),
+    ts:     Date.now(),
+  }).catch(() => {});
+}
+
+function applyChat(data, sender) {
+  const uid  = sender || data.userId || 'unknown';
+  const name = data.name || uid.split(':')[0].replace('@','');
+  const msg  = { uid, name, text: data.text || '', ts: data.ts || Date.now(), isMe: uid === myUserId };
+  chatMessages.push(msg);
+  if (chatMessages.length > 200) chatMessages.shift();
+  renderChatMessage(msg);
+
+  if (!chatOpen) {
+    unreadChat++;
+    const badge = $('#chat-badge');
+    badge.textContent = unreadChat > 9 ? '9+' : String(unreadChat);
+    badge.style.display = '';
+  }
+}
+
+function renderChatMessage(msg) {
+  const el = document.createElement('div');
+  el.className = 'chat-msg';
+  const d = new Date(msg.ts);
+  const time = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+  el.innerHTML = `<span class="chat-msg-name" style="color:${colorFor(msg.uid)}">${esc(msg.name)}</span><span class="chat-msg-text">${esc(msg.text)}</span><span class="chat-msg-time">${time}</span>`;
+  const msgs = $('#chat-messages');
+  msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function addSystemMessage(text) {
+  const el = document.createElement('div');
+  el.className = 'chat-system';
+  el.textContent = text;
+  const msgs = $('#chat-messages');
+  if (msgs) { msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight; }
 }
 
 // ─── Queue UI ────────────────────────────────────────────────────────────────
@@ -700,18 +867,11 @@ function broadcastQueue() {
 
 // ─── YouTube Player ──────────────────────────────────────────────────────────
 
-function ensureYtPlayerDiv() {
-  let el = document.getElementById('yt-player');
-  if (!el) {
-    const container = document.getElementById('yt-player-container');
-    if (container) {
-      container.innerHTML = '';
-      el = document.createElement('div');
-      el.id = 'yt-player';
-      container.appendChild(el);
-    }
-  }
-  return el;
+function showFallback() {
+  const ytc = document.getElementById('yt-player-container');
+  const fbc = document.getElementById('fallback-container');
+  if (ytc) ytc.style.display = 'none';
+  if (fbc) fbc.style.display = '';
 }
 
 function showYtPlayer() {
@@ -721,145 +881,86 @@ function showYtPlayer() {
   if (fbc) { fbc.style.display = 'none'; fbc.innerHTML = ''; }
 }
 
-function showFallback() {
-  const ytc = document.getElementById('yt-player-container');
-  const fbc = document.getElementById('fallback-container');
-  if (ytc) ytc.style.display = 'none';
-  if (fbc) fbc.style.display = '';
-}
-
 window.onYouTubeIframeAPIReady = function() {
   console.log('[watch-together] YT IFrame API ready');
   ytApiReady = true;
-  createYouTubePlayer(0);
+  createYouTubePlayer();
 };
 
-/*
- * FIX (CORE): The init modes are completely redesigned.
- *
- * The old code always tried sending `origin = window.location.origin`.
- * Inside Element Desktop's widget iframe the origin is something like
- * "vector://vector" or "null" — YouTube rejects this, the postMessage
- * handshake fails, onReady never fires, and all 4 modes timeout.
- *
- * New strategy:
- *   Mode 0: youtube-nocookie, NO origin, NO widget_referrer  (cleanest for sandboxed frames)
- *   Mode 1: youtube.com,      NO origin, NO widget_referrer
- *   Mode 2: youtube.com,      WITH origin (only if we have a real https origin)
- *   Mode 3: youtube-nocookie, WITH origin (only if we have a real https origin)
- *
- * Additionally we catch the constructor throw and move on immediately
- * instead of waiting for the 4s timeout.
- */
-function createYouTubePlayer(modeIndex) {
+function createYouTubePlayer() {
   playerInitFailed = false;
   usingFallbackEmbed = false;
   showYtPlayer();
-  ensureYtPlayerDiv();
-
-  const modes = [
-    // Mode 0: No origin at all — works best in sandboxed/widget iframes
-    { host: 'https://www.youtube-nocookie.com', origin: null, widgetRef: null },
-    // Mode 1: Plain youtube.com, no origin
-    { host: 'https://www.youtube.com',          origin: null, widgetRef: null },
-    // Mode 2: youtube.com with real origin (only useful on actual https hosting)
-    { host: 'https://www.youtube.com',          origin: SAFE_ORIGIN, widgetRef: null },
-    // Mode 3: nocookie with real origin
-    { host: 'https://www.youtube-nocookie.com',  origin: SAFE_ORIGIN, widgetRef: SAFE_ORIGIN },
-  ];
-
-  const mode = modes[Math.min(modeIndex, modes.length - 1)];
-  playerInitModeIndex = Math.min(modeIndex, modes.length - 1);
-
-  console.log(`[watch-together] Creating YT player mode ${playerInitModeIndex}:`, mode);
-
-  const playerVars = {
-    autoplay: 0,
-    controls: 0,
-    rel: 0,
-    modestbranding: 1,
-    iv_load_policy: 3,
-    playsinline: 1,
-    enablejsapi: 1,
-    // FIX: Disable the "More videos" overlay that causes click-jacking issues
-    fs: 0,
-  };
-
-  // FIX: Only add origin if we actually have one AND it's a real https origin.
-  // Sending a bad/null/vector:// origin is what kills the postMessage bridge.
-  if (mode.origin && /^https:/.test(mode.origin)) {
-    playerVars.origin = mode.origin;
-  }
-  if (mode.widgetRef && /^https:/.test(mode.widgetRef)) {
-    playerVars.widget_referrer = mode.widgetRef;
-  }
 
   // Destroy old player safely
   try {
-    if (ytPlayer && typeof ytPlayer.destroy === 'function') {
-      ytPlayer.destroy();
-    }
-  } catch (e) {
-    console.warn('[watch-together] Could not destroy old player:', e);
-  }
+    if (ytPlayer && typeof ytPlayer.destroy === 'function') ytPlayer.destroy();
+  } catch(e) {}
   ytPlayer = null;
   ytReady = false;
 
-  // Re-create mount div after destroy
-  ensureYtPlayerDiv();
+  // Re-create the mount div fresh — YT.Player replaces it with an iframe
+  const container = document.getElementById('yt-player-container');
+  if (container) {
+    container.innerHTML = '';
+    const div = document.createElement('div');
+    div.id = 'yt-player';
+    container.appendChild(div);
+  }
+
+  // Get real pixel dimensions for YT constructor — passing "100%" causes Error 153
+  // in sandboxed frames because YouTube can't measure a percentage-sized target.
+  const wrap = document.getElementById('player-wrap');
+  const w = wrap?.offsetWidth  || 640;
+  const h = wrap?.offsetHeight || 360;
 
   try {
     ytPlayer = new YT.Player('yt-player', {
-      height: '100%',
-      width: '100%',
-      host: mode.host,
-      playerVars,
+      width:  w,
+      height: h,
+      // nocookie + no origin = most permissive for sandboxed iframe contexts
+      host: 'https://www.youtube-nocookie.com',
+      playerVars: {
+        autoplay:        0,
+        controls:        0,
+        rel:             0,
+        modestbranding:  1,
+        iv_load_policy:  3,
+        playsinline:     1,
+        enablejsapi:     1,
+        // Do NOT pass origin — in vector://vector or null-origin contexts
+        // a mismatched origin breaks the postMessage bridge entirely.
+      },
       events: {
-        onReady: onYTReady,
+        onReady:       onYTReady,
         onStateChange: onYTStateChange,
-        onError: onYTError,
+        onError:       onYTError,
       }
     });
-  } catch (e) {
+  } catch(e) {
     console.error('[watch-together] YT.Player constructor threw:', e);
-    // Don't wait for timeout — immediately try next mode
-    if (playerInitModeIndex < modes.length - 1) {
-      setTimeout(() => createYouTubePlayer(playerInitModeIndex + 1), 300);
-    } else {
-      playerInitFailed = true;
-      handlePlayerInitFailed();
-    }
+    playerInitFailed = true;
+    handlePlayerInitFailed();
     return;
   }
 
-  // FIX: After the player creates its iframe, patch its attributes
-  // Use a short delay to let YT.Player inject the iframe
+  // After iframe is injected, override its size to fill the container via CSS
   setTimeout(() => {
     const iframe = document.querySelector('#yt-player-container iframe');
     if (iframe) {
-      // FIX: Remove referrerpolicy or set to no-referrer so YouTube
-      // doesn't get a mismatched referrer from the widget sandbox
+      iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;';
       iframe.setAttribute('referrerpolicy', 'no-referrer');
-      iframe.removeAttribute('sandbox'); // Element may add sandbox; we need postMessage
-      iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen; autoplay');
+      iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen');
     }
-  }, 500);
+  }, 400);
 
   if (playerInitTimer) clearTimeout(playerInitTimer);
   playerInitTimer = setTimeout(() => {
     if (ytReady) return;
-    const modes_count = modes.length;
-    if (playerInitModeIndex < modes_count - 1) {
-      const nextMode = playerInitModeIndex + 1;
-      console.warn(`[watch-together] YT player not ready, retrying init mode ${nextMode}`);
-      setStatus(`retrying player init (${nextMode + 1}/${modes_count})`);
-      createYouTubePlayer(nextMode);
-      return;
-    }
-    console.warn('[watch-together] All YT player init modes exhausted');
+    console.warn('[watch-together] YT player did not become ready — using fallback');
     playerInitFailed = true;
     handlePlayerInitFailed();
-  }, 5000); // FIX: Increased timeout from 4s to 5s — Element widget frames are slower
+  }, 8000);
 }
 
 function handlePlayerInitFailed() {
@@ -878,7 +979,7 @@ function onYTReady() {
   ytErrorCount = 0;
   if (playerInitTimer) clearTimeout(playerInitTimer);
 
-  console.log('[watch-together] YT Player ready (mode', playerInitModeIndex, ')');
+  console.log('[watch-together] YT Player ready');
 
   // Patch iframe attributes now that it's definitely in the DOM
   const iframe = document.querySelector('#yt-player-container iframe');
@@ -909,36 +1010,19 @@ function onYTError(e) {
   ytErrorCount++;
 
   const messages = {
-    2:   'Invalid parameter / blocked embed',
+    2:   'Invalid video ID',
     5:   'HTML5 player error',
     100: 'Video not found or private',
     101: 'Embed not allowed by owner',
     150: 'Embed not allowed by owner',
+    153: 'Player config error — using fallback',
   };
   const msg = messages[code] || `Player error (code ${code})`;
   toast(msg, 4000);
   setStatus('error: ' + msg);
 
-  // Too many consecutive errors → permanent fallback
-  if (ytErrorCount >= MAX_YT_ERRORS_BEFORE_FALLBACK) {
-    console.warn('[watch-together] Too many YT errors, switching to permanent fallback');
-    playerInitFailed = true;
-    if (currentId) {
-      playWithFallbackEmbed(currentId, 0);
-    }
-    return;
-  }
-
-  // Origin/policy errors → retry next init mode
-  if ((code === 2 || code === 5 || code === 153) && playerInitModeIndex < 3) {
-    const nextMode = playerInitModeIndex + 1;
-    toast('Retrying player in compatibility mode…', 2500);
-    createYouTubePlayer(nextMode);
-    return;
-  }
-
-  // Permanent init failure
-  if (code === 153) {
+  // Config / policy errors → switch to fallback embed
+  if (code === 153 || code === 2 || code === 5) {
     playerInitFailed = true;
     if (currentId) playWithFallbackEmbed(currentId, 0);
     return;
@@ -1194,6 +1278,7 @@ async function initWidget() {
       onReady();
       return;
     }
+
     const WidgetApi = matrixWidgetApi.WidgetApi;
     const WidgetApiToWidgetAction = matrixWidgetApi.WidgetApiToWidgetAction;
 
@@ -1202,22 +1287,21 @@ async function initWidget() {
 
     widgetApi = new WidgetApi(widgetId);
 
+    // Register capabilities BEFORE calling start()
     widgetApi.requestCapabilityToSendEvent(EVENT_TYPE);
     widgetApi.requestCapabilityToReceiveEvent(EVENT_TYPE);
     widgetApi.requestCapabilityToSendEvent(QUEUE_TYPE);
     widgetApi.requestCapabilityToReceiveEvent(QUEUE_TYPE);
+    widgetApi.requestCapabilityToSendEvent(PRESENCE_TYPE);
+    widgetApi.requestCapabilityToReceiveEvent(PRESENCE_TYPE);
+    widgetApi.requestCapabilityToSendEvent(CHAT_TYPE);
+    widgetApi.requestCapabilityToReceiveEvent(CHAT_TYPE);
 
-    widgetApi.on('ready', async () => {
-      try {
-        const info = await widgetApi.requestOpenIDConnectToken();
-        myUserId = info?.matrix_server_name ? `@unknown:${info.matrix_server_name}` : '@me:local';
-      } catch { myUserId = '@me:local'; }
-      onReady();
-    });
-
+    // Listen for incoming room events (sync + queue + presence + chat)
     widgetApi.on(`action:${WidgetApiToWidgetAction.SendEvent}`, (ev) => {
       const { type, content, sender } = ev.detail?.data || {};
       ev.preventDefault();
+      // Must ACK the action or Element will retry it
       widgetApi.transport.reply(ev.detail, {});
 
       if (type === EVENT_TYPE) {
@@ -1225,9 +1309,10 @@ async function initWidget() {
           viewers[sender] = viewers[sender] || {};
           viewers[sender].position = content.position;
           viewers[sender].name = sender.split(':')[0].replace('@','');
+          viewers[sender].lastSeen = Date.now();
           renderViewers();
         }
-        if (sender === myUserId) return;
+        if (sender === myUserId) return; // ignore our own echo
         applySync(content);
       }
 
@@ -1237,20 +1322,32 @@ async function initWidget() {
           renderQueue();
         }
       }
+
+      if (type === PRESENCE_TYPE) {
+        if (sender !== myUserId) applyPresence(content, sender);
+      }
+
+      if (type === CHAT_TYPE) {
+        if (sender !== myUserId) applyChat(content, sender);
+      }
     });
 
+    // start() resolves once Element has approved capabilities
     widgetApi.start();
 
-    setTimeout(() => {
-      if (!myUserId) {
-        console.warn('Widget API timeout — running standalone');
-        myUserId = '@standalone:local';
-        onReady();
-      }
-    }, 3000);
+    // Try to get our user ID from the OIDC token
+    try {
+      const info = await widgetApi.requestOpenIDConnectToken();
+      myUserId = info?.matrix_server_name ? `@me:${info.matrix_server_name}` : '@me:local';
+    } catch {
+      myUserId = '@me:local';
+    }
+
+    setSyncStatus('live');
+    onReady();
 
   } catch (err) {
-    console.warn('Widget API unavailable, running standalone:', err);
+    console.warn('Widget API error, running standalone:', err);
     myUserId = '@standalone:local';
     widgetApi = null;
     onReady();
@@ -1260,18 +1357,31 @@ async function initWidget() {
 function onReady() {
   $('#not-ready').classList.add('hidden');
 
+  myJoinedAt = Date.now();
+
+  viewers[myUserId] = {
+    name:     myUserId.split(':')[0].replace('@',''),
+    joinedAt: myJoinedAt,
+    lastSeen: myJoinedAt,
+    color:    colorFor(myUserId),
+  };
+
+  // Start as host; electHost will hand off if someone else has older joinedAt
   isHost = true;
-  $('#host-badge').style.display = isHost ? '' : 'none';
+  $('#host-badge').style.display = '';
   setStatus('ready · paste a URL to watch together');
 
-  viewers[myUserId] = { name: myUserId.split(':')[0].replace('@',''), isHost, color: colorFor(myUserId) };
   renderViewers();
   renderQueue();
 
-  setSyncStatus(widgetApi ? 'live' : 'waiting');
-
-  if (!widgetApi) {
+  if (widgetApi) {
+    setSyncStatus('live');
+    startPresence();
+    addSystemMessage('Connected to room.');
+  } else {
+    setSyncStatus('waiting');
     toast('Running standalone (no Matrix room connected)');
+    addSystemMessage('Standalone mode — no room connected.');
   }
 }
 
@@ -1370,14 +1480,33 @@ document.querySelectorAll('.stab').forEach(tab => {
 function activateTab(name) {
   document.querySelectorAll('.stab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
+  if (name === 'chat') {
+    chatOpen = true;
+    unreadChat = 0;
+    $('#chat-badge').style.display = 'none';
+    const msgs = $('#chat-messages');
+    if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    setTimeout(() => $('#chat-input')?.focus(), 50);
+  } else {
+    chatOpen = false;
+  }
 }
+
+// ─── Chat submit ──────────────────────────────────────────────────────────────
+$('#chat-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = $('#chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  // Show own message immediately
+  applyChat({ userId: myUserId, name: myUserId.split(':')[0].replace('@',''), text, ts: Date.now() }, myUserId);
+  broadcastChat(text);
+});
 
 // ─── Local Volume Controls ───────────────────────────────────────────────────
 const muteBtn = document.getElementById('mute-btn');
 const volumeSlider = document.getElementById('volume-slider');
-
-let isLocalMuted = false;
-let localVolume = 100;
 
 function updateVolumeIcon() {
   if (isLocalMuted || localVolume === 0) {
