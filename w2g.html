@@ -3,8 +3,16 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<!-- FIX 1: Referrer policy meta tag — tells the browser to send origin info to YouTube -->
-<meta name="referrer" content="strict-origin-when-cross-origin"/>
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'none';
+  script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.youtube.com https://s.ytimg.com;
+  frame-src https://www.youtube-nocookie.com https://www.youtube.com;
+  connect-src https://noembed.com https://www.youtube.com;
+  img-src 'self' https://img.youtube.com data:;
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src https://fonts.gstatic.com;
+">
+<meta name="referrer" content="origin"/>
 <title>Watch Together</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
 <style>
@@ -164,6 +172,31 @@
   #idle-screen p { font-size: 13px; }
   #idle-screen span { font-family: var(--font-mono); font-size: 11px; color: var(--muted); opacity: 0.7; }
 
+  /* Volume Controls */
+  .volume-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto; /* Pushes the volume controls to the right side of the bar */
+    padding-left: 12px;
+    border-left: 1px solid var(--border);
+  } 
+
+  #mute-btn {
+   background: transparent;
+   padding: 4px 8px;
+   font-size: 1.1rem;
+  }
+
+  #mute-btn:hover {
+   background: var(--surface2);
+  }
+
+  #volume-slider {
+   width: 80px;
+    cursor: pointer;
+    accent-color: var(--accent); /* Uses your existing red accent color */
+  }
   #controls {
     background: linear-gradient(transparent, rgba(0,0,0,0.8));
     padding: 8px 12px 10px;
@@ -421,6 +454,10 @@
         <button class="ctrl-btn" id="play-pause-btn" title="Play/Pause">
           <svg id="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
         </button>
+        <div class="volume-container">
+          <button id="mute-btn" class="btn" title="Mute/Unmute">🔊</button>
+          <input type="range" id="volume-slider" min="0" max="100" value="100" title="Volume">
+        </div>
         <div id="progress-wrap">
           <div id="progress-bar"></div>
         </div>
@@ -459,7 +496,12 @@
 <script src="https://cdn.jsdelivr.net/npm/matrix-widget-api@1.9.0/dist/matrix-widget-api.js"></script>
 <script>
   var tag = document.createElement('script');
+  window.__ytApiScriptFailed = false;
   tag.src = 'https://www.youtube.com/iframe_api';
+  tag.onerror = function() {
+    window.__ytApiScriptFailed = true;
+    console.error('Could not load YouTube API script');
+  };
   document.head.appendChild(tag);
 </script>
 
@@ -477,6 +519,7 @@ const DEBOUNCE_MS = 800;
 let widgetApi   = null;
 let ytPlayer    = null;
 let ytReady     = false;
+let ytApiReady  = false;
 let isHost      = false;
 let myUserId    = null;
 let currentId   = null;
@@ -485,6 +528,9 @@ let ignoreNext  = false;
 let driftTimer  = null;
 let queue       = [];
 let viewers     = {};
+let pendingPlay = null;
+let playerInitTimer = null;
+let playerInitModeIndex = 0;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const COLORS = ['#ff4545','#ff7043','#f0c040','#3dd68c','#4fc3f7','#ba68c8','#f06292'];
@@ -615,47 +661,92 @@ function broadcastQueue() {
 // ─── YouTube Player ──────────────────────────────────────────────────────────
 // FIX 3: Add origin + host + widget_referrer to fix Error 153
 window.onYouTubeIframeAPIReady = function() {
-  // Determine the origin for the player
-  const pageOrigin = window.location.origin || window.location.protocol + '//' + window.location.host;
+  ytApiReady = true;
+  createYouTubePlayer(0);
+};
+
+function createYouTubePlayer(modeIndex) {
+  // Only send origin on http(s). file:// yields "null" which can break local embeds.
+  const isHttpOrigin = /^https?:$/.test(window.location.protocol);
+  const pageOrigin = isHttpOrigin ? window.location.origin : null;
+  const modes = [
+    { host: 'https://www.youtube-nocookie.com', includeOrigin: true, includeWidgetReferrer: true },
+    { host: 'https://www.youtube.com',          includeOrigin: true, includeWidgetReferrer: true },
+    { host: 'https://www.youtube.com',          includeOrigin: true, includeWidgetReferrer: false },
+    { host: 'https://www.youtube.com',          includeOrigin: false, includeWidgetReferrer: false },
+  ];
+  const mode = modes[Math.min(modeIndex, modes.length - 1)];
+  playerInitModeIndex = Math.min(modeIndex, modes.length - 1);
+
+  const playerVars = {
+    autoplay: 0,
+    controls: 0,
+    rel: 0,
+    modestbranding: 1,
+    iv_load_policy: 3,
+    playsinline: 1,
+    // enablejsapi is required for postMessage control
+    enablejsapi: 1,
+  };
+  if (pageOrigin && mode.includeOrigin) {
+    // Helps YouTube validate embed source on hosted environments.
+    playerVars.origin = pageOrigin;
+  }
+  if (pageOrigin && mode.includeWidgetReferrer) {
+    playerVars.widget_referrer = pageOrigin;
+  }
+
+  try {
+    if (ytPlayer && typeof ytPlayer.destroy === 'function') ytPlayer.destroy();
+  } catch {}
 
   ytPlayer = new YT.Player('yt-player', {
     height: '100%',
     width: '100%',
-    // FIX 3a: Set host to youtube-nocookie for better embed compat
-    host: 'https://www.youtube-nocookie.com',
-    playerVars: {
-      autoplay: 0,
-      controls: 0,
-      rel: 0,
-      modestbranding: 1,
-      iv_load_policy: 3,
-      playsinline: 1,
-      // FIX 3b: origin tells YT who's embedding — required since late 2025
-      origin: pageOrigin,
-      // FIX 3c: widget_referrer helps YouTube validate the embed source
-      widget_referrer: pageOrigin,
-      // FIX 3d: enablejsapi is required for postMessage control
-      enablejsapi: 1,
-    },
+    host: mode.host,
+    playerVars,
     events: {
       onReady: onYTReady,
       onStateChange: onYTStateChange,
       onError: onYTError,
     }
   });
-};
+
+  if (playerInitTimer) clearTimeout(playerInitTimer);
+  playerInitTimer = setTimeout(() => {
+    if (ytReady) return;
+    if (playerInitModeIndex < modes.length - 1) {
+      const nextMode = playerInitModeIndex + 1;
+      console.warn('YT player not ready, retrying init mode', nextMode);
+      createYouTubePlayer(nextMode);
+      return;
+    }
+    setStatus('error: player initialization failed');
+    toast('Player failed to initialize. Check browser console for details.', 5000);
+  }, 8000);
+}
 
 function onYTReady() {
   ytReady = true;
+  if (playerInitTimer) clearTimeout(playerInitTimer);
 
   // FIX 3e: After player creates iframe, set referrerpolicy on it
   const iframe = document.querySelector('#yt-player iframe, #player-wrap iframe');
   if (iframe) {
-    iframe.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+    iframe.setAttribute('referrerpolicy', 'origin');
     iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen');
   }
 
   startDriftCheck();
+  // Apply local volume UI state to the actual player once ready.
+  ytPlayer.setVolume(localVolume);
+  if (isLocalMuted) ytPlayer.mute();
+  // If user clicked Play before ready, start it now.
+  if (pendingPlay?.videoId) {
+    const { videoId, seek } = pendingPlay;
+    pendingPlay = null;
+    playVideo(videoId, seek);
+  }
   console.log('YT Player ready');
 }
 
@@ -673,6 +764,14 @@ function onYTError(e) {
   const msg = messages[code] || `Player error (code ${code})`;
   toast(msg, 4000);
   setStatus('error: ' + msg);
+
+  // Error 153 and early init errors are often referrer/origin policy mismatches.
+  if ((code === 2 || code === 5 || code === 153) && playerInitModeIndex < 3) {
+    const nextMode = playerInitModeIndex + 1;
+    toast('Retrying player in compatibility mode…', 2500);
+    createYouTubePlayer(nextMode);
+    return;
+  }
 
   // If embed blocked, try next in queue
   if (code === 101 || code === 150) {
@@ -732,7 +831,8 @@ function updateControlsUI() {
 
 function playVideo(videoId, seek) {
   if (!ytReady) {
-    toast('Player not ready yet, try again in a moment');
+    pendingPlay = { videoId, seek: seek || 0 };
+    toast(ytApiReady ? 'Player is loading, will start shortly…' : 'YouTube API still loading, please wait…');
     return;
   }
   currentId = videoId;
@@ -768,8 +868,11 @@ function broadcastSync(extra = {}) {
 }
 
 function applySync(content) {
+  const { videoId, position, state, ts } = content || {};
+  if (typeof position !== 'number' || isNaN(position) || position < 0 || position > 86400) return;
+  if (typeof ts !== 'number' || isNaN(ts)) return;
+  if (!['playing', 'paused'].includes(state)) return;
   if (!ytReady) return;
-  const { videoId, position, state, ts } = content;
   if (!videoId || typeof videoId !== 'string') return;
   // Validate video ID format
   if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return;
@@ -996,6 +1099,74 @@ function activateTab(name) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
 }
 
+// ─── Local Volume Controls ───────────────────────────────────────────────────
+const muteBtn = document.getElementById('mute-btn');
+const volumeSlider = document.getElementById('volume-slider');
+
+let isLocalMuted = false;
+let localVolume = 100;
+
+// Helper to update the button icon based on state
+function updateVolumeIcon() {
+  if (isLocalMuted || localVolume === 0) {
+    muteBtn.textContent = '🔇';
+  } else if (localVolume < 50) {
+    muteBtn.textContent = '🔉';
+  } else {
+    muteBtn.textContent = '🔊';
+  }
+}
+
+// Mute Toggle Event
+muteBtn.addEventListener('click', () => {
+  isLocalMuted = !isLocalMuted;
+  
+  if (ytPlayer && typeof ytPlayer.mute === 'function') {
+    isLocalMuted ? ytPlayer.mute() : ytPlayer.unMute();
+    
+    // If unmuting and volume is 0, bump it up slightly so they can hear it
+    if (!isLocalMuted && localVolume === 0) {
+      localVolume = 20;
+      volumeSlider.value = localVolume;
+      ytPlayer.setVolume(localVolume);
+    }
+  }
+  
+  updateVolumeIcon();
+});
+
+// Volume Slider Event (Triggers as the user drags)
+volumeSlider.addEventListener('input', (e) => {
+  localVolume = parseInt(e.target.value, 10);
+  
+  if (ytPlayer && typeof ytPlayer.setVolume === 'function') {
+    ytPlayer.setVolume(localVolume);
+    
+    // If the user drags volume > 0 while muted, automatically unmute
+    if (isLocalMuted && localVolume > 0) {
+      isLocalMuted = false;
+      ytPlayer.unMute();
+    }
+    // If user drags volume to 0, functionally mute
+    if (!isLocalMuted && localVolume === 0) {
+      isLocalMuted = true;
+      ytPlayer.mute();
+    }
+  }
+  
+  updateVolumeIcon();
+});
+
+// Hook into onPlayerReady to ensure the player matches our initial UI state
+// (Find your existing onPlayerReady function and add these two lines at the end)
+/*
+function onPlayerReady(event) {
+  // ... existing code ...
+  ytPlayer.setVolume(localVolume);
+  if (isLocalMuted) ytPlayer.mute();
+}
+*/
+
 // ─── Title fetch ─────────────────────────────────────────────────────────────
 async function fetchTitle(videoId) {
   // FIX 8: Use noembed.com first (more CORS-friendly), then YouTube oEmbed
@@ -1023,6 +1194,30 @@ async function fetchTitle(videoId) {
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 initWidget();
+
+setTimeout(() => {
+  if (window.__ytApiScriptFailed) {
+    toast('Could not load YouTube API script', 5000);
+    setStatus('error: YouTube API script failed to load');
+    return;
+  }
+  if (!ytApiReady) {
+    toast('YouTube API did not load. If testing locally, use http://localhost (not file://).', 5000);
+    setStatus('error: YouTube API failed to load');
+  }
+}, 7000);
+
+window.addEventListener('error', (ev) => {
+  if (!ev?.message) return;
+  console.error('Unhandled error:', ev.message, ev.error);
+  if (!ytReady) setStatus('error: ' + ev.message);
+});
+
+window.addEventListener('unhandledrejection', (ev) => {
+  const msg = ev?.reason?.message || String(ev?.reason || 'promise rejection');
+  console.error('Unhandled rejection:', ev.reason);
+  if (!ytReady) setStatus('error: ' + msg);
+});
 </script>
 </body>
 </html>
